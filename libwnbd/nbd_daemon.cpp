@@ -11,6 +11,11 @@
 #define _NTSCSI_USER_MODE_
 #include <scsi.h>
 
+DWORD NbdGetReadResponseBufferSize(
+    _In_ UINT32 RequestLength,
+    _In_ UINT32 PreallocatedBufferSize,
+    _Out_ PUINT32 DataBufferSize);
+
 DWORD SetTcpFlags(SOCKET Fd)
 {
     LogDebug("Setting TCP_NODELAY.");
@@ -528,11 +533,16 @@ DWORD NbdDaemon::ProcessNbdReply(LPOVERLAPPED Overlapped)
 
     if (!Reply.Error && Request.RequestType == WnbdReqTypeRead) {
         // We shouldn't get requests larger than the maximum transfer
-        // length.
-        if (Request.Length > PreallocatedRBuffSz) {
+        // length. Only the actual request length should be returned to WNBD,
+        // not the full reusable buffer capacity.
+        Err = NbdGetReadResponseBufferSize(
+            Request.Length,
+            PreallocatedRBuffSz,
+            &DataBufferSize);
+        if (Err) {
             LogError("Invalid read request length: %ld. Maximum length: %ld.",
-                     PreallocatedRBuffSz, PreallocatedRBuffSz);
-            return ERROR_FILE_TOO_LARGE;
+                     Request.Length, PreallocatedRBuffSz);
+            return Err;
         }
 
         Err = RecvExact(Socket, PreallocatedRBuff, Request.Length);
@@ -542,7 +552,6 @@ DWORD NbdDaemon::ProcessNbdReply(LPOVERLAPPED Overlapped)
         }
 
         DataBuffer = PreallocatedRBuff;
-        DataBufferSize = PreallocatedRBuffSz;
     }
 
     WNBD_IO_RESPONSE Resp = { 0 };

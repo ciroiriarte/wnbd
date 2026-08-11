@@ -63,12 +63,18 @@ Add driver-backed tests for:
 - backend NBD error replies;
 - unsupported flush/unmap feature flags.
 
+## Performance regression coverage
+
+Implemented deterministic structural checks:
+
+- read response `DataBufferSize` equals actual request length and oversized
+  reads are rejected before submitting the WNBD response.
+
 ## Performance regression roadmap
 
 Avoid wall-clock timing gates on shared CI runners. Prefer deterministic counters
 and structural assertions, such as:
 
-- read response `DataBufferSize` equals actual request length;
 - write path avoids an extra full-payload copy once scatter/gather is added;
 - submitted request lookup reports O(1) path usage once indexed;
 - lookaside/pool miss counters are bounded;

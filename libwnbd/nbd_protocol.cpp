@@ -349,6 +349,23 @@ DWORD NbdRequireFixedNewstyle(
     return (ClientFlags & NBD_FLAG_FIXED_NEWSTYLE) ? 0 : ERROR_NOT_SUPPORTED;
 }
 
+DWORD NbdGetReadResponseBufferSize(
+    _In_ UINT32 RequestLength,
+    _In_ UINT32 PreallocatedBufferSize,
+    _Out_ PUINT32 DataBufferSize)
+{
+    if (!DataBufferSize) {
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    if (RequestLength > PreallocatedBufferSize) {
+        return ERROR_FILE_TOO_LARGE;
+    }
+
+    *DataBufferSize = RequestLength;
+    return 0;
+}
+
 DWORD NbdSendOptExportName(
     _In_ SOCKET Fd,
     _In_ PUINT64 Size,

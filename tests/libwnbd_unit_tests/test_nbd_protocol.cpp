@@ -38,6 +38,11 @@ UINT32 NbdMaskClientFlags(
 DWORD NbdRequireFixedNewstyle(
     _In_ UINT32 ClientFlags);
 
+DWORD NbdGetReadResponseBufferSize(
+    _In_ UINT32 RequestLength,
+    _In_ UINT32 PreallocatedBufferSize,
+    _Out_ PUINT32 DataBufferSize);
+
 void NbdEncodeRequest(
     _Out_ PNBD_REQUEST Request,
     _In_ UINT64 Offset,
@@ -322,4 +327,31 @@ TEST(TestNbdProtocol, FixedNewstyleRequirementRejectsMaskedClientFlags)
     EXPECT_EQ((UINT32) NBD_FLAG_NO_ZEROES, Masked);
     EXPECT_EQ(ERROR_NOT_SUPPORTED, NbdRequireFixedNewstyle(Masked));
     EXPECT_EQ(0, NbdRequireFixedNewstyle(NBD_FLAG_FIXED_NEWSTYLE));
+}
+
+TEST(TestNbdProtocolPerformance, ReadResponseUsesActualRequestLength)
+{
+    UINT32 DataBufferSize = 0;
+
+    EXPECT_EQ(0, NbdGetReadResponseBufferSize(4096, 1024 * 1024,
+                                              &DataBufferSize));
+    EXPECT_EQ(4096UL, DataBufferSize);
+
+    DataBufferSize = 0;
+    EXPECT_EQ(0, NbdGetReadResponseBufferSize(1024 * 1024, 1024 * 1024,
+                                              &DataBufferSize));
+    EXPECT_EQ(1024UL * 1024UL, DataBufferSize);
+}
+
+TEST(TestNbdProtocolPerformance, ReadResponseRejectsOversizedRequest)
+{
+    UINT32 DataBufferSize = 0xaaaaaaaa;
+
+    EXPECT_EQ(ERROR_FILE_TOO_LARGE,
+              NbdGetReadResponseBufferSize(1024 * 1024 + 1,
+                                           1024 * 1024,
+                                           &DataBufferSize));
+    EXPECT_EQ(0xaaaaaaaaUL, DataBufferSize);
+    EXPECT_EQ(ERROR_INVALID_PARAMETER,
+              NbdGetReadResponseBufferSize(1, 1, nullptr));
 }
