@@ -110,6 +110,32 @@ jobs:
           -GTestFilter TestNbd.TestFlush
           -Port 10811
           -OutputDir ci-artifacts
+      - name: "Run fake NBD full I/O test"
+        run: >
+          powershell -ExecutionPolicy Bypass -File tests\ci\run-fake-nbd-test.ps1
+          -TestExecutable libwnbd_tests.exe
+          -Scenario record
+          -GTestFilter TestNbd.TestIO
+          -Port 10812
+          -OutputDir ci-artifacts
+      - name: "Run fake NBD disconnect/error race tests"
+        run: |
+          $scenarios = @(
+            @{ Name = "close-after-write-read"; Filter = "TestNbdFailures.ReadFailureAfterWriteCompletes"; Port = 10813 },
+            @{ Name = "truncate-after-write-read"; Filter = "TestNbdFailures.ReadFailureAfterWriteCompletes"; Port = 10814 },
+            @{ Name = "error-after-write-read"; Filter = "TestNbdFailures.ReadFailureAfterWriteCompletes"; Port = 10815 },
+            @{ Name = "unexpected-handle-after-write-read"; Filter = "TestNbdFailures.ReadFailureAfterWriteCompletes"; Port = 10816 },
+            @{ Name = "stall-after-write-read"; Filter = "TestNbdFailures.RemovalWhileReadIsStalledCompletes"; Port = 10817 }
+          )
+          foreach ($scenario in $scenarios) {
+            powershell -ExecutionPolicy Bypass -File tests\ci\run-fake-nbd-test.ps1 `
+              -TestExecutable libwnbd_tests.exe `
+              -Scenario $scenario.Name `
+              -GTestFilter $scenario.Filter `
+              -Port $scenario.Port `
+              -OutputDir ci-artifacts
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
       - name: "Install qemu, used for NBD tests"
         run: choco install qemu --version 2023.4.24 -y
       - name: "Add qemu directory to env PATH"

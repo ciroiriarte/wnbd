@@ -10,6 +10,10 @@
 #include "options.h"
 #include "test_skip.h"
 
+#include <atomic>
+#include <memory>
+#include <thread>
+
 using namespace std;
 
 class NbdMapping {
@@ -63,7 +67,43 @@ public:
             cout << "Nbd daemon stopped." << endl;
         }
     }
+
+    const std::string& GetInstanceName() const {
+        return InstanceName;
+    }
 };
+
+HANDLE OpenNbdDisk(
+    const std::string& InstanceName,
+    DWORD DesiredAccess = GENERIC_READ | GENERIC_WRITE)
+{
+    string DiskPath = GetDiskPath(InstanceName.c_str());
+    HANDLE DiskHandle = CreateFileA(
+        DiskPath.c_str(),
+        DesiredAccess,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        NULL,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
+        NULL);
+    return DiskHandle;
+}
+
+void WriteSingleNbdBlock(HANDLE DiskHandle, DWORD BlockSize)
+{
+    unique_ptr<void, decltype(&free)> WriteBuffer(malloc(BlockSize), free);
+    ASSERT_TRUE(WriteBuffer.get()) << "couldn't allocate: " << BlockSize;
+    memset(WriteBuffer.get(), 0x5a, BlockSize);
+
+    DWORD BytesWritten = 0;
+    ASSERT_TRUE(WriteFile(DiskHandle, WriteBuffer.get(), BlockSize,
+                          &BytesWritten, NULL))
+        << "write failed: " << WinStrError(GetLastError());
+    ASSERT_EQ(BlockSize, BytesWritten);
+
+    LARGE_INTEGER Offset = { 0 };
+    ASSERT_TRUE(SetFilePointerEx(DiskHandle, Offset, NULL, FILE_BEGIN));
+}
 
 const char* GetMissingNbdParamReason() {
     if (GetOpt<string>("nbd-export-name").empty()) {
@@ -140,6 +180,81 @@ TEST(TestNbd, TestFlush) {
         << "flush failed: " << WinStrError(GetLastError());
 }
 
+
+TEST(TestNbdFailures, ReadFailureAfterWriteCompletes) {
+    if (const char* SkipReason = GetMissingNbdParamReason()) {
+        WNBD_GTEST_SKIP(SkipReason);
+    }
+
+    WNBD_PROPERTIES WnbdProps = { 0 };
+    NbdMapping Mapping(&WnbdProps);
+
+    WNBD_CONNECTION_INFO ConnectionInfo = { 0 };
+    NTSTATUS Status = WnbdShow(WnbdProps.InstanceName, &ConnectionInfo);
+    ASSERT_FALSE(Status) << "couldn't retrieve WNBD disk info";
+    const DWORD BlockSize = ConnectionInfo.Properties.BlockSize;
+    ASSERT_LT(0UL, BlockSize);
+
+    HANDLE DiskHandle = OpenNbdDisk(Mapping.GetInstanceName());
+    ASSERT_NE(INVALID_HANDLE_VALUE, DiskHandle)
+        << "couldn't open disk, error: " << WinStrError(GetLastError());
+    unique_ptr<void, decltype(&CloseHandle)> DiskHandleCloser(
+        DiskHandle, &CloseHandle);
+    SetDiskWritable(DiskHandle);
+
+    WriteSingleNbdBlock(DiskHandle, BlockSize);
+
+    unique_ptr<void, decltype(&free)> ReadBuffer(malloc(BlockSize), free);
+    ASSERT_TRUE(ReadBuffer.get()) << "couldn't allocate: " << BlockSize;
+    DWORD BytesRead = 0;
+    ASSERT_FALSE(ReadFile(DiskHandle, ReadBuffer.get(), BlockSize,
+                          &BytesRead, NULL))
+        << "read unexpectedly succeeded";
+}
+
+TEST(TestNbdFailures, RemovalWhileReadIsStalledCompletes) {
+    if (const char* SkipReason = GetMissingNbdParamReason()) {
+        WNBD_GTEST_SKIP(SkipReason);
+    }
+
+    WNBD_PROPERTIES WnbdProps = { 0 };
+    auto Mapping = make_unique<NbdMapping>(&WnbdProps);
+
+    WNBD_CONNECTION_INFO ConnectionInfo = { 0 };
+    NTSTATUS Status = WnbdShow(WnbdProps.InstanceName, &ConnectionInfo);
+    ASSERT_FALSE(Status) << "couldn't retrieve WNBD disk info";
+    const DWORD BlockSize = ConnectionInfo.Properties.BlockSize;
+    ASSERT_LT(0UL, BlockSize);
+
+    HANDLE DiskHandle = OpenNbdDisk(Mapping->GetInstanceName());
+    ASSERT_NE(INVALID_HANDLE_VALUE, DiskHandle)
+        << "couldn't open disk, error: " << WinStrError(GetLastError());
+    unique_ptr<void, decltype(&CloseHandle)> DiskHandleCloser(
+        DiskHandle, &CloseHandle);
+    SetDiskWritable(DiskHandle);
+
+    WriteSingleNbdBlock(DiskHandle, BlockSize);
+
+    unique_ptr<void, decltype(&free)> ReadBuffer(malloc(BlockSize), free);
+    ASSERT_TRUE(ReadBuffer.get()) << "couldn't allocate: " << BlockSize;
+
+    std::atomic<bool> ReadFinished = false;
+    BOOL ReadSucceeded = TRUE;
+    DWORD BytesRead = 0;
+    std::thread ReadThread([&] {
+        ReadSucceeded = ReadFile(DiskHandle, ReadBuffer.get(), BlockSize,
+                                 &BytesRead, NULL);
+        ReadFinished = true;
+    });
+
+    Sleep(1000);
+    Mapping.reset();
+
+    EVENTUALLY(ReadFinished.load(), 40, 250);
+    ReadThread.join();
+    EXPECT_FALSE(ReadSucceeded) << "stalled read unexpectedly succeeded";
+}
+
 TEST(TestNbd, TestIO) {
     if (const char* SkipReason = GetMissingNbdParamReason()) {
         WNBD_GTEST_SKIP(SkipReason);
@@ -177,6 +292,7 @@ TEST(TestNbd, TestIO) {
         << ", error: " << WinStrError(GetLastError());
     unique_ptr<void, decltype(&CloseHandle)> DiskHandleCloser(
         DiskHandle, &CloseHandle);
+    SetDiskWritable(DiskHandle);
 
     // 2. Write one block at the beginning of the disk and then read it
     // ----------------------------------------------------------------

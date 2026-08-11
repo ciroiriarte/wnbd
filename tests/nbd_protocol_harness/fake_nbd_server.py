@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import argparse
 import enum
+import errno
 import socket
 import struct
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
@@ -52,6 +54,11 @@ class Scenario(enum.Enum):
     RECORD = "record"
     ASSERT_DISC = "assert-disc"
     ASSERT_FLUSH_ZERO = "assert-flush-zero"
+    CLOSE_AFTER_WRITE_READ = "close-after-write-read"
+    ERROR_AFTER_WRITE_READ = "error-after-write-read"
+    STALL_AFTER_WRITE_READ = "stall-after-write-read"
+    TRUNCATE_AFTER_WRITE_READ = "truncate-after-write-read"
+    UNEXPECTED_HANDLE_AFTER_WRITE_READ = "unexpected-handle-after-write-read"
     INVALID_INIT_MAGIC = "invalid-init-magic"
     ACK_WITHOUT_EXPORT = "ack-without-export"
     TRUNCATED_INFO = "truncated-info"
@@ -64,6 +71,7 @@ class NbdRequest:
     cookie: int
     offset: int
     length: int
+    payload: bytes = b""
 
     @property
     def is_disc(self) -> bool:
@@ -152,14 +160,35 @@ def read_request(conn: socket.socket) -> NbdRequest:
     magic, flags, command, cookie, offset, length = struct.unpack(">IHHQQI", recv_exact(conn, 28))
     if magic != NBD_REQUEST_MAGIC:
         raise AssertionError(f"unexpected request magic: 0x{magic:x}")
+    payload = b""
     if command == NBD_CMD_WRITE and length:
-        recv_exact(conn, length)
-    return NbdRequest(flags=flags, command=command, cookie=cookie, offset=offset, length=length)
+        payload = recv_exact(conn, length)
+    return NbdRequest(
+        flags=flags, command=command, cookie=cookie, offset=offset,
+        length=length, payload=payload)
+
+
+def in_bounds(req: NbdRequest, export_size: int) -> bool:
+    return req.offset <= export_size and req.length <= export_size - req.offset
+
+
+def wait_for_peer_close(conn: socket.socket, timeout: float) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if not conn.recv(1):
+                return
+        except socket.timeout:
+            continue
+        except OSError:
+            return
 
 
 def serve(args: argparse.Namespace) -> int:
     scenario = Scenario(args.scenario)
     requests: list[NbdRequest] = []
+    storage = bytearray(args.export_size)
+    fault_armed = False
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server.settimeout(args.timeout)
@@ -194,9 +223,48 @@ def serve(args: argparse.Namespace) -> int:
                     return 0
                 if req.is_disc:
                     return 0
+
+                if req.command == NBD_CMD_WRITE:
+                    if not in_bounds(req, args.export_size):
+                        send_simple_reply(conn, req.cookie, errno.EINVAL)
+                    else:
+                        storage[req.offset:req.offset + req.length] = req.payload
+                        fault_armed = True
+                        send_simple_reply(conn, req.cookie)
+                    continue
+
+                if req.command == NBD_CMD_READ:
+                    if fault_armed and scenario == Scenario.CLOSE_AFTER_WRITE_READ:
+                        return 0
+                    if fault_armed and scenario == Scenario.UNEXPECTED_HANDLE_AFTER_WRITE_READ:
+                        send_simple_reply(conn, req.cookie + 1)
+                        return 0
+                    if fault_armed and scenario == Scenario.ERROR_AFTER_WRITE_READ:
+                        send_simple_reply(conn, req.cookie, errno.EIO)
+                        return 0
+                    if fault_armed and scenario == Scenario.STALL_AFTER_WRITE_READ:
+                        wait_for_peer_close(conn, args.stall_seconds)
+                        return 0
+                    if not in_bounds(req, args.export_size):
+                        send_simple_reply(conn, req.cookie, errno.EINVAL)
+                    else:
+                        send_simple_reply(conn, req.cookie)
+                        payload = bytes(storage[req.offset:req.offset + req.length])
+                        if fault_armed and scenario == Scenario.TRUNCATE_AFTER_WRITE_READ:
+                            conn.sendall(payload[:max(0, len(payload) // 2)])
+                            return 0
+                        conn.sendall(payload)
+                    continue
+
+                if req.command == NBD_CMD_TRIM:
+                    if not in_bounds(req, args.export_size):
+                        send_simple_reply(conn, req.cookie, errno.EINVAL)
+                    else:
+                        storage[req.offset:req.offset + req.length] = bytes(req.length)
+                        send_simple_reply(conn, req.cookie)
+                    continue
+
                 send_simple_reply(conn, req.cookie)
-                if req.command == NBD_CMD_READ and req.length:
-                    conn.sendall(bytes(req.length))
 
     if scenario == Scenario.ASSERT_DISC and not any(r.is_disc for r in requests):
         raise AssertionError("client never sent NBD_CMD_DISC")
@@ -212,6 +280,7 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=15.0)
     parser.add_argument("--export-size", type=int, default=64 * 1024 * 1024)
     parser.add_argument("--max-requests", type=int, default=128)
+    parser.add_argument("--stall-seconds", type=float, default=5.0)
     parser.add_argument("--scenario", choices=[s.value for s in Scenario], default=Scenario.RECORD.value)
     parser.add_argument("--self-test", action="store_true", help="run a loopback harness smoke test and exit")
     return parser.parse_args(argv)

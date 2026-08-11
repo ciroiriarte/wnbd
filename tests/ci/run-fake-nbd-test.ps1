@@ -6,7 +6,8 @@ Param(
   [string]$Scenario = "assert-disc",
   [string]$ExportName = "test",
   [string]$GTestFilter = "TestNbd.TestMap",
-  [string]$OutputDir = "ci-artifacts"
+  [string]$OutputDir = "ci-artifacts",
+  [string[]]$ExtraServerArgs = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,8 +23,8 @@ $ServerArgs = @(
   "--host", $HostName,
   "--port", $Port,
   "--scenario", $Scenario,
-  "--max-requests", "128"
-)
+  "--max-requests", "512"
+) + $ExtraServerArgs
 
 $Server = Start-Process `
   -FilePath $PythonExecutable `
