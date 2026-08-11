@@ -102,6 +102,14 @@ jobs:
           -Scenario assert-disc
           -Port 10810
           -OutputDir ci-artifacts
+      - name: "Run fake NBD FLUSH assertion test"
+        run: >
+          powershell -ExecutionPolicy Bypass -File tests\ci\run-fake-nbd-test.ps1
+          -TestExecutable libwnbd_tests.exe
+          -Scenario assert-flush-zero
+          -GTestFilter TestNbd.TestFlush
+          -Port 10811
+          -OutputDir ci-artifacts
       - name: "Install qemu, used for NBD tests"
         run: choco install qemu --version 2023.4.24 -y
       - name: "Add qemu directory to env PATH"

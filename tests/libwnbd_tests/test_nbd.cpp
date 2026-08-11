@@ -112,6 +112,34 @@ TEST(TestNbd, TestMap) {
     EXPECT_EQ(ERROR_FILE_NOT_FOUND, Status);
 }
 
+
+TEST(TestNbd, TestFlush) {
+    if (const char* SkipReason = GetMissingNbdParamReason()) {
+        WNBD_GTEST_SKIP(SkipReason);
+    }
+
+    WNBD_PROPERTIES WnbdProps = { 0 };
+    NbdMapping Mapping(&WnbdProps);
+
+    string DiskPath = GetDiskPath(WnbdProps.InstanceName);
+    HANDLE DiskHandle = CreateFileA(
+        DiskPath.c_str(),
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        NULL,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
+        NULL);
+    ASSERT_NE(INVALID_HANDLE_VALUE, DiskHandle)
+        << "couldn't open disk: " << DiskPath
+        << ", error: " << WinStrError(GetLastError());
+    unique_ptr<void, decltype(&CloseHandle)> DiskHandleCloser(
+        DiskHandle, &CloseHandle);
+
+    ASSERT_TRUE(FlushFileBuffers(DiskHandle))
+        << "flush failed: " << WinStrError(GetLastError());
+}
+
 TEST(TestNbd, TestIO) {
     if (const char* SkipReason = GetMissingNbdParamReason()) {
         WNBD_GTEST_SKIP(SkipReason);
