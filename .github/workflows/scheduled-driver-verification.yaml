@@ -53,3 +53,65 @@ jobs:
           "## Scheduled driver verification" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
           "Full SDV runs separately from the pull-request gate while the historical C1250/toolchain issue is investigated." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
           "Diagnostics artifact: wnbd-scheduled-driver-verification" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+
+  driver-verifier-smoke:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
+      - name: "Add toolkit bin dir to env PATH"
+        run: >
+          Add-Content $env:GITHUB_PATH
+          "C:\Program Files (x86)\Windows Kits\10\bin\x64"
+      - name: "Build WNBD Release"
+        run: >
+          msbuild vstudio\wnbd.sln
+          /property:Configuration=Release
+      - name: "Add WNBD build directory to env PATH"
+        run: >
+          Add-Content $env:GITHUB_PATH
+          (Resolve-Path vstudio\x64\Release).Path
+      - name: "Import WNBD certificate to root store"
+        run: >
+          Import-Certificate
+          -FilePath vstudio\x64\Release\wnbd.cer
+          -Cert Cert:\LocalMachine\Root
+      - name: "Import WNBD certificate to trusted publisher store"
+        run: >
+          Import-Certificate
+          -FilePath vstudio\x64\Release\wnbd.cer
+          -Cert Cert:\LocalMachine\TrustedPublisher
+      - name: "Import WNBD event definitions"
+        run: wevtutil im vstudio\wnbdevents.xml
+      - name: "Install the WNBD driver and create the virtual adapter"
+        timeout-minutes: 1
+        run: >
+          wnbd-client install-driver --debug
+          vstudio\x64\Release\driver\wnbd.inf
+      - name: "Run Driver Verifier smoke tests"
+        run: >
+          powershell -ExecutionPolicy Bypass -File tests\ci\run-driver-verifier-smoke.ps1
+          -TestExecutable libwnbd_tests.exe
+          -OutputDir ci-artifacts
+      - name: "Collect diagnostics"
+        if: always()
+        run: powershell -ExecutionPolicy Bypass -File tests\ci\collect-diagnostics.ps1 -OutputDir ci-artifacts
+      - name: "Upload Driver Verifier diagnostics"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wnbd-scheduled-driver-verifier-smoke
+          path: ci-artifacts
+          if-no-files-found: ignore
+      - name: "Write workflow summary"
+        if: always()
+        run: |
+          "## Scheduled Driver Verifier smoke" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "Driver Verifier volatile smoke runs separately from the pull-request gate." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "Diagnostics artifact: wnbd-scheduled-driver-verifier-smoke" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
