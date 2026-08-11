@@ -18,6 +18,12 @@ using boost::endian::native_to_big_inplace;
 using boost::endian::big_to_native;
 using boost::endian::big_to_native_inplace;
 
+typedef DWORD (*NbdRecvExactFn)(
+    _In_ SOCKET Fd,
+    _Inout_ PVOID Data,
+    _In_ size_t Length,
+    _In_opt_ PVOID Context);
+
 _Use_decl_annotations_
 DWORD RecvExact(
     SOCKET Fd,
@@ -169,9 +175,30 @@ DWORD NbdSendInfoRequest(
     return Retval;
 }
 
-#pragma warning(disable:6001)
-PNBD_HANDSHAKE_RPL NbdReadHandshakeReply(_In_ SOCKET Fd)
+namespace {
+
+DWORD NbdRecvExactAdapter(
+    SOCKET Fd,
+    PVOID Data,
+    size_t Length,
+    PVOID Context)
 {
+    UNREFERENCED_PARAMETER(Context);
+    return RecvExact(Fd, Data, Length);
+}
+
+}
+
+#pragma warning(disable:6001)
+PNBD_HANDSHAKE_RPL NbdReadHandshakeReplyWithRecv(
+    _In_ SOCKET Fd,
+    _In_ NbdRecvExactFn RecvFn,
+    _In_opt_ PVOID Context)
+{
+    if (!RecvFn) {
+        return nullptr;
+    }
+
     PNBD_HANDSHAKE_RPL Reply = (PNBD_HANDSHAKE_RPL) calloc(
         1, sizeof(NBD_HANDSHAKE_RPL));
     if (!Reply) {
@@ -179,7 +206,7 @@ PNBD_HANDSHAKE_RPL NbdReadHandshakeReply(_In_ SOCKET Fd)
         return nullptr;
     }
 
-    DWORD Retval = RecvExact(Fd, Reply, sizeof(*Reply));
+    DWORD Retval = RecvFn(Fd, Reply, sizeof(*Reply), Context);
     if (Retval) {
         free(Reply);
         return nullptr;
@@ -207,12 +234,18 @@ PNBD_HANDSHAKE_RPL NbdReadHandshakeReply(_In_ SOCKET Fd)
         }
         Reply = (PNBD_HANDSHAKE_RPL) ReplyTemp;
 
-        Retval = RecvExact(Fd, &(Reply->Data), Reply->Datasize);
+        Retval = RecvFn(Fd, Reply->Data, Reply->Datasize, Context);
         if (Retval) {
             free(Reply);
+            return nullptr;
         }
     }
     return Reply;
+}
+
+PNBD_HANDSHAKE_RPL NbdReadHandshakeReply(_In_ SOCKET Fd)
+{
+    return NbdReadHandshakeReplyWithRecv(Fd, NbdRecvExactAdapter, nullptr);
 }
 #pragma warning(default:6001)
 
@@ -226,6 +259,94 @@ void NbdParseSizes(
     Data += sizeof(*Size);
     CopyMemory(Flags, Data, sizeof(*Flags));
     big_to_native_inplace(*Flags);
+}
+
+DWORD NbdValidateInitialMagic(
+    _In_reads_bytes_(Length) const CHAR* Magic,
+    _In_ size_t Length)
+{
+    const size_t ExpectedLength = sizeof(INIT_PASSWD) - 1;
+    if (!Magic ||
+            Length != ExpectedLength ||
+            memcmp(Magic, INIT_PASSWD, ExpectedLength)) {
+        return ERROR_BAD_FORMAT;
+    }
+    return 0;
+}
+
+DWORD NbdValidateOptionMagic(
+    _In_ UINT64 Magic,
+    _Out_opt_ PBOOLEAN OldStyle)
+{
+    if (OldStyle) {
+        *OldStyle = FALSE;
+    }
+    if (OPTION_MAGIC == Magic) {
+        return 0;
+    }
+    if (CLIENT_MAGIC == Magic) {
+        if (OldStyle) {
+            *OldStyle = TRUE;
+        }
+        return ERROR_NOT_SUPPORTED;
+    }
+    return ERROR_BAD_FORMAT;
+}
+
+DWORD NbdParseOptGoReply(
+    _In_ UINT32 ReplyType,
+    _In_reads_bytes_opt_(DataLength) const CHAR* Data,
+    _In_ UINT32 DataLength,
+    _Inout_ PUINT64 Size,
+    _Inout_ PUINT16 Flags,
+    _Inout_ PBOOLEAN SeenExport)
+{
+    if (!Size || !Flags || !SeenExport) {
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    if (ReplyType == NBD_REP_ACK) {
+        if (DataLength != 0) {
+            return ERROR_BAD_FORMAT;
+        }
+        return *SeenExport ? 0 : ERROR_BAD_FORMAT;
+    }
+
+    if (ReplyType != NBD_REP_INFO) {
+        return 0;
+    }
+
+    if (!Data || DataLength < sizeof(UINT16)) {
+        return ERROR_BAD_FORMAT;
+    }
+
+    UINT16 Type;
+    memcpy(&Type, Data, sizeof(Type));
+    big_to_native_inplace(Type);
+    if (Type != NBD_INFO_EXPORT) {
+        return 0;
+    }
+
+    if (DataLength != sizeof(Type) + sizeof(*Size) + sizeof(*Flags)) {
+        return ERROR_BAD_FORMAT;
+    }
+
+    NbdParseSizes((PCHAR) Data + sizeof(Type), Size, Flags);
+    *SeenExport = TRUE;
+    return 0;
+}
+
+UINT32 NbdMaskClientFlags(
+    _In_ UINT32 ClientFlags,
+    _In_ UINT16 ServerFlags)
+{
+    return ClientFlags & ServerFlags;
+}
+
+DWORD NbdRequireFixedNewstyle(
+    _In_ UINT32 ClientFlags)
+{
+    return (ClientFlags & NBD_FLAG_FIXED_NEWSTYLE) ? 0 : ERROR_NOT_SUPPORTED;
 }
 
 DWORD NbdSendOptExportName(
@@ -273,17 +394,26 @@ DWORD NbdNegotiate(
     if (Retval) {
         return Retval;
     }
-    if (!strcmp(Buf, INIT_PASSWD)) {
-        // TODO: should we error out otherwise?
-        LogDebug("Received NBD INIT_PASSWD");
+    Retval = NbdValidateInitialMagic(Buf, 8);
+    if (Retval) {
+        LogError("Received invalid NBD initial magic.");
+        return Retval;
     }
+    LogDebug("Received NBD INIT_PASSWD");
 
     if (Retval = RecvExact(Fd, &Magic, sizeof(Magic)); Retval) {
         return Retval;
     }
     big_to_native_inplace(Magic);
-    if (OPTION_MAGIC != Magic && CLIENT_MAGIC == Magic) {
-        LogInfo("Old-style NBD server.");
+    BOOLEAN OldStyle = FALSE;
+    Retval = NbdValidateOptionMagic(Magic, &OldStyle);
+    if (Retval) {
+        if (OldStyle) {
+            LogInfo("Old-style NBD server is unsupported.");
+        } else {
+            LogError("Received invalid NBD option magic %llu.", Magic);
+        }
+        return Retval;
     }
 
     if (Retval = RecvExact(Fd, &GFlags, sizeof(UINT16)); Retval) {
@@ -294,6 +424,17 @@ DWORD NbdNegotiate(
     if (GFlags & NBD_FLAG_NO_ZEROES) {
         ClientFlags |= NBD_FLAG_NO_ZEROES;
     }
+    ClientFlags = NbdMaskClientFlags(ClientFlags, GFlags);
+
+    Retval = NbdRequireFixedNewstyle(ClientFlags);
+    if (Retval) {
+        // This implementation relies on fixed-newstyle option haggling and
+        // NBD_OPT_GO, so reject non-fixed newstyle instead of silently sending
+        // unsupported option requests.
+        LogError("NBD server does not advertise fixed-newstyle; "
+                 "NBD_OPT_GO negotiation is unsupported.");
+        return Retval;
+    }
 
     big_to_native_inplace(ClientFlags);
     Retval = SendExact(Fd, (PCHAR) &ClientFlags, sizeof(ClientFlags));
@@ -303,6 +444,7 @@ DWORD NbdNegotiate(
     }
 
     PNBD_HANDSHAKE_RPL Reply = NULL;
+    BOOLEAN SeenExport = FALSE;
     Retval = NbdSendInfoRequest(Fd, NBD_OPT_GO, 0, NULL, ExportName);
     if (Retval) {
         LogError("Could not send NBD handshake request.");
@@ -322,14 +464,14 @@ DWORD NbdNegotiate(
             switch (Reply->ReplyType) {
             case NBD_REP_ERR_UNSUP:
                 LogWarning("Received NBD_REP_ERR_UNSUP reply. "
-                           "Trying NBD_OPT_EXPORT_NAME as fallback.");
+                           "Retrying with legacy NBD_OPT_EXPORT_NAME.");
                 free(Reply);
                 Retval = NbdSendOptExportName(Fd, Size, Flags,
                                               ExportName, GFlags);
                 if (Retval) {
                     LogError("NBD_OPT_EXPORT_NAME failed.");
                 } else {
-                    LogInfo("NBD_OPT_EXPORT_NAME fallback succeeded.");
+                    LogInfo("Legacy NBD_OPT_EXPORT_NAME succeeded.");
                 }
                 return Retval;
             case NBD_REP_ERR_POLICY:
@@ -357,25 +499,22 @@ DWORD NbdNegotiate(
             }
         }
 
-        UINT16 Type;
-        switch (Reply->ReplyType) {
-        case NBD_REP_INFO:
-            memcpy(&Type, Reply->Data, 2);
-            big_to_native_inplace(Type);
-            switch (Type) {
-            case NBD_INFO_EXPORT:
-                NbdParseSizes(Reply->Data + 2, Size, Flags);
-                break;
-            default:
-                LogWarning("Ignoring unsupported NBD reply info type: %u",
-                           (unsigned int) Type);
-                break;
-            }
-            break;
-        case NBD_REP_ACK:
+        Retval = NbdParseOptGoReply(
+            Reply->ReplyType,
+            Reply->Data,
+            Reply->Datasize,
+            Size,
+            Flags,
+            &SeenExport);
+        if (Retval) {
+            LogError("Malformed NBD_OPT_GO reply.");
+            free(Reply);
+            return Retval;
+        }
+
+        if (Reply->ReplyType == NBD_REP_ACK) {
             LogDebug("Received NBD_REP_ACK.");
-            break;
-        default:
+        } else if (Reply->ReplyType != NBD_REP_INFO) {
             LogWarning("Ignoring unknown reply to NBD_OPT_GO: %u.",
                        (unsigned int) Reply->ReplyType);
         }
@@ -387,6 +526,20 @@ DWORD NbdNegotiate(
 
     LogInfo("NBD negotiation successful.");
     return 0;
+}
+
+void NbdEncodeRequest(
+    _Out_ PNBD_REQUEST Request,
+    _In_ UINT64 Offset,
+    _In_ ULONG Length,
+    _In_ UINT64 Handle,
+    _In_ NbdRequestType RequestType)
+{
+    Request->Magic = native_to_big((ULONG) NBD_REQUEST_MAGIC);
+    Request->Type = native_to_big((ULONG) RequestType);
+    Request->Length = native_to_big((ULONG) Length);
+    Request->From = native_to_big((UINT64) Offset);
+    Request->Handle = Handle;
 }
 
 _Use_decl_annotations_
@@ -402,11 +555,7 @@ DWORD NbdRequest(
     }
 
     NBD_REQUEST Request;
-    Request.Magic = native_to_big((ULONG) NBD_REQUEST_MAGIC);
-    Request.Type = native_to_big((ULONG) RequestType);
-    Request.Length = native_to_big((ULONG) Length);
-    Request.From = native_to_big((UINT64) Offset);
-    Request.Handle = Handle;
+    NbdEncodeRequest(&Request, Offset, Length, Handle, RequestType);
 
     DWORD Retval = SendExact(Fd, &Request, sizeof(NBD_REQUEST));
     if (Retval) {
@@ -438,12 +587,12 @@ DWORD NbdSendWrite(
     }
 
     NBD_REQUEST Request;
-    Request.Magic = native_to_big((ULONG) NBD_REQUEST_MAGIC);
-    Request.Type = native_to_big(
-        (ULONG) (NBD_CMD_WRITE | NbdTransmissionFlags));
-    Request.Length = native_to_big((ULONG) Length);
-    Request.From = native_to_big((UINT64) Offset);
-    Request.Handle = Handle;
+    NbdEncodeRequest(
+        &Request,
+        Offset,
+        Length,
+        Handle,
+        (NbdRequestType) (NBD_CMD_WRITE | NbdTransmissionFlags));
 
     UINT Needed = Length + sizeof(NBD_REQUEST);
     if (*PreallocatedLength < Needed) {

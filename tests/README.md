@@ -5,6 +5,9 @@ executable scaffolding for protocol-level and CI diagnostics tests.
 
 ## Current suites
 
+- `libwnbd_unit_tests.exe` (`tests/libwnbd_unit_tests`): fast user-mode
+  GoogleTest binary for protocol/helper checks that do not require WNBD driver
+  installation or qemu.
 - `libwnbd_tests.exe` (`tests/libwnbd_tests`): integration-oriented tests that
   exercise the installed WNBD driver, virtual disks, driver options, IOCTLs, and
   optional qemu-backed userspace NBD mappings.
@@ -23,7 +26,9 @@ explicit targets:
    - no driver install;
    - no qemu dependency;
    - tests pure protocol helpers, packet encoding/decoding, option parsing, and
-     future parser seams extracted from `libwnbd/nbd_protocol.cpp`.
+     parser helpers extracted from `libwnbd/nbd_protocol.cpp`;
+   - CI builds and runs this target before importing the test certificate,
+     installing the driver, or installing qemu.
 2. `libwnbd_integration_tests.exe`
    - requires the WNBD driver;
    - covers mapping, IOCTLs, disk I/O, qemu-backed NBD, removal, and pending I/O

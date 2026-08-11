@@ -32,6 +32,7 @@ private:
     WNBD_PROPERTIES WnbdProps = {0};
 
     SOCKET Socket = INVALID_SOCKET;
+    bool NbdTransmissionStarted = false;
 
     std::mutex ShutdownLock;
     bool Terminated = false;

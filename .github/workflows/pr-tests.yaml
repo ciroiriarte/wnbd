@@ -65,6 +65,16 @@ jobs:
         run: >
           Add-Content $env:GITHUB_PATH
           (Resolve-Path vstudio\x64\${{ matrix.configuration }}).Path
+      - name: "Run WNBD unit tests"
+        run: |
+          New-Item -ItemType Directory -Force -Path ci-artifacts | Out-Null
+          libwnbd_unit_tests.exe --gtest_output=xml:ci-artifacts\libwnbd-unit-tests-${{ matrix.configuration }}.xml
+      - name: "Write unit test summary"
+        if: always()
+        run: >
+          powershell -ExecutionPolicy Bypass -File tests\ci\write-test-summary.ps1
+          -XmlPath ci-artifacts\libwnbd-unit-tests-${{ matrix.configuration }}.xml
+          -Title "WNBD ${{ matrix.configuration }} unit test summary"
       - name: "Import WNBD certificate to root store"
         run: >
           Import-Certificate

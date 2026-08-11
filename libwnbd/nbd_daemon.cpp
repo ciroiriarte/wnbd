@@ -96,21 +96,37 @@ DWORD NbdDaemon::DisconnectNbd()
     DWORD Retval = 0;
     if (Socket != INVALID_SOCKET) {
         LogInfo("Removing NBD connection.");
+
+        DWORD Err = 0;
+        if (NbdTransmissionStarted) {
+            Err = NbdRequest(Socket, 0, 0, 0, NBD_CMD_DISC);
+            if (Err) {
+                Retval = Err;
+                LogWarning("Failed to send NBD disconnect request. "
+                           "Error: %d. Error message: %s",
+                           Err, win32_strerror(Err).c_str());
+            }
+        } else {
+            LogDebug("Skipping NBD disconnect request before transmission "
+                     "phase.");
+        }
+
         if (shutdown(Socket, SD_BOTH)) {
             Retval = SOCKET_ERROR;
-            auto Err = WSAGetLastError();
+            Err = WSAGetLastError();
             LogWarning("NBD socket shutdown failed. "
                        "Error: %d. Error message: %s",
                        Err, win32_strerror(Err).c_str());
         }
         if (closesocket(Socket)) {
             Retval = SOCKET_ERROR;
-            auto Err = WSAGetLastError();
+            Err = WSAGetLastError();
             LogWarning("NBD socket close failed. "
                        "Error: %d. Error message: %s",
                        Err, win32_strerror(Err).c_str());
         }
         Socket = INVALID_SOCKET;
+        NbdTransmissionStarted = false;
         LogInfo("NBD connection closed.");
     } else {
         LogDebug("Socket already closed.");
@@ -175,6 +191,7 @@ DWORD NbdDaemon::TryStart()
 
         WnbdProps.BlockCount = DiskSize / WnbdProps.BlockSize;
     }
+    NbdTransmissionStarted = true;
 
     WnbdProps.Flags.ReadOnly |= CHECK_NBD_READONLY(NbdFlags);
     WnbdProps.Flags.UnmapSupported |= CHECK_NBD_SEND_TRIM(NbdFlags);
@@ -394,8 +411,8 @@ void NbdDaemon::Flush(
 
     DWORD Err = NbdRequest(
         Handler->Socket,
-        BlockAddress * Handler->WnbdProps.BlockSize,
-        BlockCount * Handler->WnbdProps.BlockSize,
+        0,
+        0,
         RequestHandle,
         NBD_CMD_FLUSH);
     if (Err) {
