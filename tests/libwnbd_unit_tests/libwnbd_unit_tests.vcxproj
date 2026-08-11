@@ -34,6 +34,7 @@
     </ClCompile>
     <ClCompile Include="test.cpp" />
     <ClCompile Include="test_nbd_protocol.cpp" />
+    <ClCompile Include="test_nbd_protocol_fuzz.cpp" />
     <ClCompile Include="test_protocol_basics.cpp" />
     <ClCompile Include="..\..\libwnbd\nbd_protocol.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
