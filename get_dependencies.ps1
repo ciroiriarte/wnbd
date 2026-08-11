@@ -15,6 +15,8 @@ $depsDir = "$scriptLocation\vstudio\deps"
 $nugetPath = "$depsDir\nuget.exe"
 $depsConfig = "$scriptLocation\packages.config"
 $completeFlag = "$depsDir\complete"
+$depsHashPath = "$depsDir\packages.sha256"
+$currentDepsHash = (Get-FileHash $depsConfig -Algorithm SHA256).Hash
 
 function safe_exec($cmd) {
     cmd /c "$cmd 2>&1"
@@ -35,10 +37,23 @@ if (!(test-path $nugetPath)) {
     Invoke-WebRequest $nugetUrl -OutFile $nugetPath
 }
 
+if ((test-path $completeFlag) -and (test-path $depsHashPath)) {
+    $storedDepsHash = (Get-Content $depsHashPath -Raw).Trim()
+    if ($storedDepsHash -ne $currentDepsHash) {
+        Write-Host "Dependency manifest changed; refreshing NuGet dependencies."
+        Remove-Item -Force $completeFlag
+    }
+}
+elseif (test-path $completeFlag) {
+    Write-Host "Dependency completion marker predates hashing; refreshing NuGet dependencies."
+    Remove-Item -Force $completeFlag
+}
+
 if (!(test-path $completeFlag)) {
     Write-Host "Retrieving dependencies."
     safe_exec "$nugetPath install $depsConfig -OutputDirectory `"$depsDir`""
-    sc $completeFlag "Finished retrieving dependencies."
+    Set-Content $completeFlag "Finished retrieving dependencies."
+    Set-Content $depsHashPath $currentDepsHash
 }
 else {
     write-host "Nuget dependencies already fetched."

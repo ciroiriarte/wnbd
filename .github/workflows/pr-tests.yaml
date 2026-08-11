@@ -2,49 +2,55 @@ name: Pull Request tests
 on:
   pull_request:
     branches: [ main ]
+
 jobs:
+  protocol-harness-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: "Run fake NBD harness self-test"
+        run: python3 tests/nbd_protocol_harness/fake_nbd_server.py --self-test
+
   static-analysis:
-    runs-on: windows-2019
+    runs-on: windows-2022
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: microsoft/setup-msbuild@v1.1
+      - uses: microsoft/setup-msbuild@v2
         with:
           msbuild-architecture: x64
-      # stampinf.exe is unavailable with the 2019 image
-      # unless we explicitly add the following to PATH
+      # stampinf.exe can be unavailable unless the toolkit bin directory is on PATH.
       - name: "Add toolkit bin dir to env PATH"
         run: >
           Add-Content $env:GITHUB_PATH
           "C:\Program Files (x86)\Windows Kits\10\bin\x64"
       - name: "Show git log"
         run: git log -n 10 --oneline
-      # SDV is skipped for now because of a cryptic error:
-      #   c1 : fatal error C1250: Unable to load plug-in '\x22dcA»'
-      #   logs: vstudio/smvbuild.log
-      #         vstudio/sdv/smvcl.log
+      # SDV remains scheduled/non-blocking in scheduled-driver-verification.yaml.
       - name: "Run static analysis tests"
         run: >
           msbuild vstudio\wnbd.sln
           /property:Configuration=Analyze
           /property:RunSDV=False
+
   build-and-test:
-    timeout-minutes: 20
+    timeout-minutes: 25
     strategy:
+      fail-fast: false
       matrix:
         configuration: [Debug, Release]
-    runs-on: windows-2019
+    runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: microsoft/setup-msbuild@v1.1
+      - uses: microsoft/setup-msbuild@v2
         with:
           msbuild-architecture: x64
-      # stampinf.exe is unavailable with the 2019 image
-      # unless we explicitly add the following to PATH
+      # stampinf.exe can be unavailable unless the toolkit bin directory is on PATH.
       - name: "Add toolkit bin dir to env PATH"
         run: >
           Add-Content $env:GITHUB_PATH
@@ -85,18 +91,42 @@ jobs:
       # cache.direct=on doesn't work with qcow2 images. Sparse files may not
       # be properly handled on Windows, so we'll avoid raw images for now.
       - name: "Start qemu-storage-daemon NBD server"
-        run: >
-          Start-Process qemu-storage-daemon
-          -ArgumentList
-          "--blockdev driver=file,node-name=file,filename=test_5tb.qcow2
-          --blockdev driver=qcow2,node-name=qcow2,file=file
-          --nbd-server addr.type=inet,addr.host=127.0.0.1,addr.port=10809
-          --export type=nbd,id=export,node-name=qcow2,name=test_5tb,writable=on"
+        run: |
+          New-Item -ItemType Directory -Force -Path ci-artifacts | Out-Null
+          $stdout = (Resolve-Path ci-artifacts).Path + "\qemu-storage-daemon.out.log"
+          $stderr = (Resolve-Path ci-artifacts).Path + "\qemu-storage-daemon.err.log"
+          $args = "--blockdev driver=file,node-name=file,filename=test_5tb.qcow2 " +
+                  "--blockdev driver=qcow2,node-name=qcow2,file=file " +
+                  "--nbd-server addr.type=inet,addr.host=127.0.0.1,addr.port=10809 " +
+                  "--export type=nbd,id=export,node-name=qcow2,name=test_5tb,writable=on"
+          Start-Process qemu-storage-daemon -ArgumentList $args -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru |
+            Select-Object -Property Id,ProcessName,StartTime |
+            Format-List
       - name: "Wait for the NBD server to start"
-        run: sleep 2
+        run: powershell -ExecutionPolicy Bypass -File tests\ci\wait-tcp.ps1 -HostName 127.0.0.1 -Port 10809 -TimeoutSeconds 20
       - name: "Run WNBD functional tests"
         run: >
           libwnbd_tests.exe
+          --gtest_output=xml:ci-artifacts\libwnbd-tests-${{ matrix.configuration }}.xml
           --nbd-export-name test_5tb
           --nbd-hostname 127.0.0.1
           --nbd-port 10809
+      - name: "Collect diagnostics"
+        if: always()
+        run: powershell -ExecutionPolicy Bypass -File tests\ci\collect-diagnostics.ps1 -OutputDir ci-artifacts
+      - name: "Stop qemu"
+        if: always()
+        run: powershell -ExecutionPolicy Bypass -File tests\ci\stop-qemu.ps1
+      - name: "Upload diagnostics"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wnbd-${{ matrix.configuration }}-diagnostics
+          path: ci-artifacts
+          if-no-files-found: ignore
+      - name: "Write workflow summary"
+        if: always()
+        run: >
+          powershell -ExecutionPolicy Bypass -File tests\ci\write-test-summary.ps1
+          -XmlPath ci-artifacts\libwnbd-tests-${{ matrix.configuration }}.xml
+          -Title "WNBD ${{ matrix.configuration }} test summary"

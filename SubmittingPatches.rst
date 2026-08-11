@@ -195,6 +195,8 @@ Test your changes
 
 Before opening your PR, it's a good idea to run tests on your patchset.
 
+See ``tests/README.md`` for the current automated test architecture, protocol harness roadmap, and CI diagnostics expectations.
+
 The most simple test is to verify that your patchset builds, at least in your
 own development environment.
 

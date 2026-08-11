@@ -8,6 +8,7 @@
 #include "mock_wnbd_daemon.h"
 #include "utils.h"
 #include "options.h"
+#include "test_skip.h"
 
 using namespace std;
 
@@ -64,23 +65,20 @@ public:
     }
 };
 
-bool CheckNbdParamsProvided() {
-    // TODO: GTEST_SKIP was included in gtest 1.9, yet Nuget only provides
-    // gtest 1.8. We should use GTEST_SKIP as soon as it becomes available.
+const char* GetMissingNbdParamReason() {
     if (GetOpt<string>("nbd-export-name").empty()) {
-        cout << "No NBD export provided, skipping NBD tests." << endl;
-        return false;
+        return "No NBD export provided, skipping NBD tests.";
     }
     if (GetOpt<string>("nbd-hostname").empty()) {
-        cout << "No NBD server address provided, skipping NBD tests." << endl;
-        return false;
+        return "No NBD server address provided, skipping NBD tests.";
     }
-    return true;
+    return nullptr;
 }
 
+
 TEST(TestNbd, TestMap) {
-    if (!CheckNbdParamsProvided()) {
-        return;
+    if (const char* SkipReason = GetMissingNbdParamReason()) {
+        WNBD_GTEST_SKIP(SkipReason);
     }
 
     WNBD_PROPERTIES WnbdProps = { 0 };
@@ -115,8 +113,8 @@ TEST(TestNbd, TestMap) {
 }
 
 TEST(TestNbd, TestIO) {
-    if (!CheckNbdParamsProvided()) {
-        return;
+    if (const char* SkipReason = GetMissingNbdParamReason()) {
+        WNBD_GTEST_SKIP(SkipReason);
     }
 
     // 1. Connect the NBD disk and retrieve connection information
