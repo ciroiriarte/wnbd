@@ -9,6 +9,8 @@
 #include "mock_wnbd_daemon.h"
 #include "utils.h"
 
+#include <chrono>
+
 MockWnbdDaemon::~MockWnbdDaemon()
 {
     if (Started && WnbdDisk) {
@@ -40,12 +42,17 @@ void MockWnbdDaemon::Start()
 
 void MockWnbdDaemon::Shutdown()
 {
+    ShutdownWithOptions(NULL);
+}
+
+void MockWnbdDaemon::ShutdownWithOptions(PWNBD_REMOVE_OPTIONS RemoveOptions)
+{
     std::unique_lock<std::mutex> Lock(ShutdownLock);
     if (!Terminated && WnbdDisk) {
         TerminateInProgress = true;
         // We're requesting the disk to be removed but continue serving IO
         // requests until the driver sends us the "Disconnect" event.
-        DWORD Ret = WnbdRemove(WnbdDisk, NULL);
+        DWORD Ret = WnbdRemove(WnbdDisk, RemoveOptions);
         if (Ret && Ret != ERROR_FILE_NOT_FOUND)
             ASSERT_FALSE(Ret) << "couldn't stop the wnbd dispatcher, err: " << Ret;
         Wait();
@@ -59,6 +66,46 @@ void MockWnbdDaemon::Wait()
         DWORD err = WnbdWaitDispatcher(WnbdDisk);
         ASSERT_FALSE(err) << "failed waiting for the dispatcher to stop";
     }
+}
+
+void MockWnbdDaemon::PauseResponsesFor(WnbdRequestType RequestType)
+{
+    std::lock_guard<std::mutex> Lock(PauseLock);
+    PausedRequestType = RequestType;
+    PauseEnabled = true;
+    RequestPaused = false;
+    ResumeRequest = false;
+}
+
+bool MockWnbdDaemon::WaitForPausedRequest(DWORD TimeoutMs)
+{
+    std::unique_lock<std::mutex> Lock(PauseLock);
+    return PauseCv.wait_for(
+        Lock,
+        std::chrono::milliseconds(TimeoutMs),
+        [&] { return RequestPaused; });
+}
+
+void MockWnbdDaemon::ResumePausedRequest()
+{
+    {
+        std::lock_guard<std::mutex> Lock(PauseLock);
+        PauseEnabled = false;
+        ResumeRequest = true;
+    }
+    PauseCv.notify_all();
+}
+
+void MockWnbdDaemon::PauseIfNeeded(WnbdRequestType RequestType)
+{
+    std::unique_lock<std::mutex> Lock(PauseLock);
+    if (!PauseEnabled || PausedRequestType != RequestType) {
+        return;
+    }
+
+    RequestPaused = true;
+    PauseCv.notify_all();
+    PauseCv.wait(Lock, [&] { return ResumeRequest; });
 }
 
 void MockWnbdDaemon::Read(
@@ -85,6 +132,7 @@ void MockWnbdDaemon::Read(
     WnbdReq.Cmd.Read.ForceUnitAccess = ForceUnitAccess;
 
     handler->ReqLog.AddEntry(WnbdReq);
+    handler->PauseIfNeeded(RequestType);
 
     if (Disk->Properties.BlockCount < BlockAddress + BlockCount) {
         // Overflow
@@ -126,6 +174,7 @@ void MockWnbdDaemon::Write(
     WnbdReq.Cmd.Write.ForceUnitAccess = ForceUnitAccess;
 
     handler->ReqLog.AddEntry(WnbdReq, Buffer, BlockCount * handler->WnbdProps->BlockSize);
+    handler->PauseIfNeeded(RequestType);
 
     WNBD_STATUS Status = handler->MockStatus;
 
@@ -161,6 +210,7 @@ void MockWnbdDaemon::Flush(
     WnbdReq.Cmd.Flush.BlockCount = BlockCount;
 
     handler->ReqLog.AddEntry(WnbdReq);
+    handler->PauseIfNeeded(RequestType);
 
     if (Disk->Properties.BlockCount < BlockAddress + BlockCount) {
         // Overflow
@@ -195,6 +245,7 @@ void MockWnbdDaemon::Unmap(
         WnbdReq,
         (void*)Descriptors,
         sizeof(WNBD_UNMAP_DESCRIPTOR) * Count);
+    handler->PauseIfNeeded(RequestType);
 
     // TODO: validate unmap descriptors
 

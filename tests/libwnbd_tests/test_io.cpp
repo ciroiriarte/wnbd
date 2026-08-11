@@ -10,6 +10,9 @@
 
 #include <ntddscsi.h>
 
+#include <atomic>
+#include <thread>
+
 void TestWrite(
     uint64_t BlockCount = DefaultBlockCount,
     uint32_t BlockSize = DefaultBlockSize,
@@ -733,4 +736,99 @@ TEST(TestScsiUnmap, TestUnmap) {
         ExpWnbdRequest,
         (void*) &ExpectedUnmapDescriptor,
         sizeof(WNBD_UNMAP_DESCRIPTOR)));
+}
+
+
+TEST(TestPendingIoRemoval, HandlesRemovalWhileWriteResponseIsPending)
+{
+    WNBD_PROPERTIES WnbdProps = { 0 };
+    GetNewWnbdProps(&WnbdProps);
+    WnbdProps.BlockCount = DefaultBlockCount;
+    WnbdProps.BlockSize = DefaultBlockSize;
+
+    MockWnbdDaemon WnbdDaemon(&WnbdProps);
+    WnbdDaemon.PauseResponsesFor(WnbdReqTypeWrite);
+    WnbdDaemon.Start();
+
+    std::string DiskPath = GetDiskPath(WnbdProps.InstanceName);
+    HANDLE DiskHandle = CreateFileA(
+        DiskPath.c_str(),
+        GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        NULL,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        NULL);
+    ASSERT_NE(INVALID_HANDLE_VALUE, DiskHandle)
+        << "couldn't open disk: " << DiskPath
+        << ", error: " << WinStrError(GetLastError());
+    std::unique_ptr<void, decltype(&CloseHandle)> DiskHandleCloser(
+        DiskHandle, &CloseHandle);
+
+    std::unique_ptr<void, decltype(&free)> WriteBuffer(
+        malloc(DefaultBlockSize), free);
+    ASSERT_TRUE(WriteBuffer.get()) << "couldn't allocate: " << DefaultBlockSize;
+    memset(WriteBuffer.get(), WRITE_BYTE_CONTENT, DefaultBlockSize);
+
+    DWORD BytesWritten = 0;
+    DWORD WriteError = ERROR_SUCCESS;
+    bool WriteResult = false;
+    std::thread WriteThread([&] {
+        WriteResult = WriteFile(
+            DiskHandle,
+            WriteBuffer.get(),
+            (DWORD)DefaultBlockSize,
+            &BytesWritten,
+            NULL);
+        if (!WriteResult) {
+            WriteError = GetLastError();
+        }
+    });
+
+    bool RequestPaused = WnbdDaemon.WaitForPausedRequest(5000);
+    EXPECT_TRUE(RequestPaused)
+        << "timed out waiting for write request to become pending";
+    if (!RequestPaused) {
+        WnbdDaemon.ResumePausedRequest();
+        WriteThread.join();
+        FAIL() << "write request did not become pending";
+    }
+
+    WNBD_IO_REQUEST ExpWnbdRequest = { 0 };
+    ExpWnbdRequest.RequestType = WnbdReqTypeWrite;
+    ExpWnbdRequest.Cmd.Write.BlockAddress = 0;
+    ExpWnbdRequest.Cmd.Write.BlockCount = 1;
+    ASSERT_TRUE(WnbdDaemon.ReqLog.HasEntry(
+        ExpWnbdRequest, WriteBuffer.get(), (DWORD)DefaultBlockSize));
+
+    WNBD_REMOVE_OPTIONS RemoveOptions = { 0 };
+    RemoveOptions.Flags.HardRemove = TRUE;
+
+    std::atomic_bool ShutdownFinished(false);
+    std::thread ShutdownThread([&] {
+        WnbdDaemon.ShutdownWithOptions(&RemoveOptions);
+        ShutdownFinished = true;
+    });
+
+    Sleep(200);
+    EXPECT_FALSE(ShutdownFinished.load())
+        << "shutdown should wait while the write response is still pending";
+
+    WnbdDaemon.ResumePausedRequest();
+
+    WriteThread.join();
+    ShutdownThread.join();
+
+    EXPECT_TRUE(ShutdownFinished.load());
+    EXPECT_TRUE(WriteResult || WriteError == ERROR_IO_DEVICE)
+        << "pending write failed with unexpected error: " << WinStrError(WriteError);
+    if (WriteResult) {
+        EXPECT_EQ((DWORD)DefaultBlockSize, BytesWritten);
+    } else {
+        EXPECT_EQ(0UL, BytesWritten);
+    }
+
+    WNBD_CONNECTION_INFO ConnectionInfo = { 0 };
+    EXPECT_EQ(ERROR_FILE_NOT_FOUND,
+              WnbdShow(WnbdProps.InstanceName, &ConnectionInfo));
 }

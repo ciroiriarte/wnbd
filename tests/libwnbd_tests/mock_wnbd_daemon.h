@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <condition_variable>
 #include <mutex>
 
 #include "request_log.h"
@@ -33,6 +34,13 @@ public:
     // passes the "Disconnect" request.
     void Wait();
     void Shutdown();
+    void ShutdownWithOptions(PWNBD_REMOVE_OPTIONS RemoveOptions);
+
+    // Test-only synchronization hooks used to keep a request pending while
+    // exercising removal/disconnect races.
+    void PauseResponsesFor(WnbdRequestType RequestType);
+    bool WaitForPausedRequest(DWORD TimeoutMs);
+    void ResumePausedRequest();
 
     void SetStatus(WNBD_STATUS& Status) {
         MockStatus = Status;
@@ -49,6 +57,15 @@ private:
     WNBD_STATUS MockStatus = { 0 };
 
     std::mutex ShutdownLock;
+
+    std::mutex PauseLock;
+    std::condition_variable PauseCv;
+    bool PauseEnabled = false;
+    bool RequestPaused = false;
+    bool ResumeRequest = false;
+    WnbdRequestType PausedRequestType = WnbdReqTypeUnknown;
+
+    void PauseIfNeeded(WnbdRequestType RequestType);
 
     // WNBD IO entry points
     static void Read(
