@@ -92,6 +92,16 @@ jobs:
         run: >
           wnbd-client install-driver --debug
           vstudio\x64\${{ matrix.configuration }}\driver\wnbd.inf
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: "Run fake NBD DISC assertion test"
+        run: >
+          powershell -ExecutionPolicy Bypass -File tests\ci\run-fake-nbd-test.ps1
+          -TestExecutable libwnbd_tests.exe
+          -Scenario assert-disc
+          -Port 10810
+          -OutputDir ci-artifacts
       - name: "Install qemu, used for NBD tests"
         run: choco install qemu --version 2023.4.24 -y
       - name: "Add qemu directory to env PATH"
