@@ -248,9 +248,7 @@ NTSTATUS WnbdDispatchRequest(
             break;
         }
 
-        ExInterlockedInsertTailList(
-            &Device->SubmittedReqListHead,
-            &Element->Link, &Device->SubmittedReqListLock);
+        WnbdSubmittedReqInsert(Device, Element);
 
         Device->Stats.LastSubmittedReqTimestamp = KeQueryInterruptTime();
         InterlockedIncrement64(&Device->Stats.TotalSubmittedIORequests);
@@ -299,18 +297,7 @@ NTSTATUS WnbdHandleResponse(
         return STATUS_ACCESS_DENIED;
     }
 
-    PLIST_ENTRY ItemLink, ItemNext;
-    KIRQL Irql = { 0 };
-    KeAcquireSpinLock(&Device->SubmittedReqListLock, &Irql);
-    LIST_FORALL_SAFE(&Device->SubmittedReqListHead, ItemLink, ItemNext) {
-        Element = CONTAINING_RECORD(ItemLink, SRB_QUEUE_ELEMENT, Link);
-        if (Element->Tag == Response->RequestHandle) {
-            RemoveEntryList(&Element->Link);
-            break;
-        }
-        Element = NULL;
-    }
-    KeReleaseSpinLock(&Device->SubmittedReqListLock, Irql);
+    Element = WnbdSubmittedReqRemoveByTag(Device, Response->RequestHandle);
     if (!Element) {
         WNBD_LOG_DEBUG("Received reply with no matching request tag: 0x%llx",
             Response->RequestHandle);

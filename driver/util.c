@@ -19,6 +19,66 @@
 #include "util.h"
 #include "options.h"
 
+static ULONG WnbdSubmittedReqBucket(_In_ UINT64 Tag)
+{
+    return (ULONG)(Tag & WNBD_SUBMITTED_REQ_HASH_MASK);
+}
+
+VOID WnbdInitSubmittedReqHash(_In_ PWNBD_DISK_DEVICE Device)
+{
+    for (ULONG Index = 0; Index < WNBD_SUBMITTED_REQ_HASH_BUCKETS; Index++) {
+        InitializeListHead(&Device->SubmittedReqHashBuckets[Index]);
+    }
+}
+
+VOID WnbdSubmittedReqInsert(_In_ PWNBD_DISK_DEVICE Device,
+                            _In_ PSRB_QUEUE_ELEMENT Element)
+{
+    KIRQL Irql;
+    KeAcquireSpinLock(&Device->SubmittedReqListLock, &Irql);
+    InsertTailList(&Device->SubmittedReqListHead, &Element->Link);
+    InsertHeadList(
+        &Device->SubmittedReqHashBuckets[WnbdSubmittedReqBucket(Element->Tag)],
+        &Element->HashLink);
+    KeReleaseSpinLock(&Device->SubmittedReqListLock, Irql);
+}
+
+PSRB_QUEUE_ELEMENT WnbdSubmittedReqRemoveByTag(_In_ PWNBD_DISK_DEVICE Device,
+                                               _In_ UINT64 Tag)
+{
+    KIRQL Irql;
+    PSRB_QUEUE_ELEMENT Found = NULL;
+    KeAcquireSpinLock(&Device->SubmittedReqListLock, &Irql);
+    PLIST_ENTRY Bucket =
+        &Device->SubmittedReqHashBuckets[WnbdSubmittedReqBucket(Tag)];
+    for (PLIST_ENTRY Link = Bucket->Flink; Link != Bucket; Link = Link->Flink) {
+        PSRB_QUEUE_ELEMENT Element =
+            CONTAINING_RECORD(Link, SRB_QUEUE_ELEMENT, HashLink);
+        if (Element->Tag == Tag) {
+            RemoveEntryList(&Element->Link);
+            RemoveEntryList(&Element->HashLink);
+            Found = Element;
+            break;
+        }
+    }
+    KeReleaseSpinLock(&Device->SubmittedReqListLock, Irql);
+    return Found;
+}
+
+PSRB_QUEUE_ELEMENT WnbdSubmittedReqRemoveHead(_In_ PWNBD_DISK_DEVICE Device)
+{
+    KIRQL Irql;
+    PSRB_QUEUE_ELEMENT Element = NULL;
+    KeAcquireSpinLock(&Device->SubmittedReqListLock, &Irql);
+    if (!IsListEmpty(&Device->SubmittedReqListHead)) {
+        PLIST_ENTRY Link = RemoveHeadList(&Device->SubmittedReqListHead);
+        Element = CONTAINING_RECORD(Link, SRB_QUEUE_ELEMENT, Link);
+        RemoveEntryList(&Element->HashLink);
+    }
+    KeReleaseSpinLock(&Device->SubmittedReqListLock, Irql);
+    return Element;
+}
+
 VOID DrainDeviceQueue(_In_ PWNBD_DISK_DEVICE Device,
                       _In_ BOOLEAN SubmittedRequests,
                       _In_ BOOLEAN CheckStaleConn)
@@ -43,8 +103,18 @@ VOID DrainDeviceQueue(_In_ PWNBD_DISK_DEVICE Device,
     BOOLEAN RemoveStaleConnections =
         WnbdDriverOptions[OptRemoveStaleConnections].Value.Data.AsBool;
 
-    while ((Request = ExInterlockedRemoveHeadList(ListHead, ListLock)) != NULL) {
-        Element = CONTAINING_RECORD(Request, SRB_QUEUE_ELEMENT, Link);
+    while (TRUE) {
+        if (SubmittedRequests) {
+            // Removes from both the submitted list and the tag hash.
+            Element = WnbdSubmittedReqRemoveHead(Device);
+            if (!Element)
+                break;
+        } else {
+            Request = ExInterlockedRemoveHeadList(ListHead, ListLock);
+            if (!Request)
+                break;
+            Element = CONTAINING_RECORD(Request, SRB_QUEUE_ELEMENT, Link);
+        }
         SrbSetDataTransferLength(Element->Srb, 0);
         SrbSetSrbStatus(Element->Srb, SRB_STATUS_ABORTED);
         if (!Element->Aborted) {
