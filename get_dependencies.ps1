@@ -16,7 +16,20 @@ $nugetPath = "$depsDir\nuget.exe"
 $depsConfig = "$scriptLocation\packages.config"
 $completeFlag = "$depsDir\complete"
 $depsHashPath = "$depsDir\packages.sha256"
-$currentDepsHash = (Get-FileHash $depsConfig -Algorithm SHA256).Hash
+
+# Use the .NET SHA256 API rather than Get-FileHash. This project's MSBuild
+# invocation runs get_dependencies.ps1 through a powershell.exe whose
+# PSModulePath omits the system module dir, so Get-FileHash (from
+# Microsoft.PowerShell.Utility) fails to load with a CommandNotFoundException.
+# The .NET API needs no module loading and yields the same uppercase hex.
+$sha256 = [System.Security.Cryptography.SHA256]::Create()
+try {
+    $currentDepsHash = [System.BitConverter]::ToString(
+        $sha256.ComputeHash([System.IO.File]::ReadAllBytes($depsConfig))).Replace("-", "")
+}
+finally {
+    $sha256.Dispose()
+}
 
 function safe_exec($cmd) {
     cmd /c "$cmd 2>&1"
