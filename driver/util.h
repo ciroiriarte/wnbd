@@ -15,6 +15,24 @@ DrainDeviceQueue(_In_ PWNBD_DISK_DEVICE Device,
                  _In_ BOOLEAN SubmittedRequests,
                  _In_ BOOLEAN CheckStaleConn);
 
+// Submitted-request bookkeeping. The submitted list and its by-tag hash index
+// are kept in sync under SubmittedReqListLock.
+VOID
+WnbdInitSubmittedReqHash(_In_ PWNBD_DISK_DEVICE Device);
+// Adds an element to the submitted list and its tag hash bucket.
+VOID
+WnbdSubmittedReqInsert(_In_ PWNBD_DISK_DEVICE Device,
+                       _In_ PSRB_QUEUE_ELEMENT Element);
+// Finds a submitted element by tag and removes it from both the list and the
+// hash. Returns NULL if no matching request is outstanding.
+PSRB_QUEUE_ELEMENT
+WnbdSubmittedReqRemoveByTag(_In_ PWNBD_DISK_DEVICE Device,
+                            _In_ UINT64 Tag);
+// Removes the head of the submitted list (and its hash entry). Returns NULL if
+// the list is empty.
+PSRB_QUEUE_ELEMENT
+WnbdSubmittedReqRemoveHead(_In_ PWNBD_DISK_DEVICE Device);
+
 VOID
 CompleteRequest(_In_ PWNBD_DISK_DEVICE Device,
                 _In_ PSRB_QUEUE_ELEMENT Element,

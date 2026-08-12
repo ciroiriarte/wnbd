@@ -158,6 +158,7 @@ WnbdInitializeDevice(_In_ PWNBD_DISK_DEVICE Device)
     KeInitializeSpinLock(&Device->PendingReqListLock);
     InitializeListHead(&Device->SubmittedReqListHead);
     KeInitializeSpinLock(&Device->SubmittedReqListLock);
+    WnbdInitSubmittedReqHash(Device);
     ExInitializeRundownProtection(&Device->RundownProtection);
     KeInitializeSemaphore(&Device->DeviceEvent, 0, 1 << 30);
     KeInitializeEvent(&Device->DeviceRemovalEvent, NotificationEvent, FALSE);

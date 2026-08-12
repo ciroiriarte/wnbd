@@ -10,6 +10,11 @@
 #include "common.h"
 #include "wnbd_ioctl.h"
 
+// Number of hash buckets used to index submitted requests by tag. Must be a
+// power of two; sized to comfortably cover the maximum per-LUN queue depth.
+#define WNBD_SUBMITTED_REQ_HASH_BUCKETS 256
+#define WNBD_SUBMITTED_REQ_HASH_MASK (WNBD_SUBMITTED_REQ_HASH_BUCKETS - 1)
+
 typedef struct _WNBD_EXTENSION {
     UNICODE_STRING                    DeviceInterface;
     LIST_ENTRY                        DeviceList;
@@ -45,6 +50,10 @@ typedef struct _WNBD_DISK_DEVICE
 
     LIST_ENTRY                  SubmittedReqListHead;
     KSPIN_LOCK                  SubmittedReqListLock;
+    // Hash buckets indexed by request tag, guarded by SubmittedReqListLock.
+    // Provides O(1) completion lookup instead of scanning the whole submitted
+    // list. Kept in sync with SubmittedReqListHead.
+    LIST_ENTRY                  SubmittedReqHashBuckets[WNBD_SUBMITTED_REQ_HASH_BUCKETS];
 
     KSEMAPHORE                  DeviceEvent;
     PVOID                       DeviceMonitorThread;
@@ -60,6 +69,8 @@ typedef struct _WNBD_DISK_DEVICE
 
 typedef struct _SRB_QUEUE_ELEMENT {
     LIST_ENTRY Link;
+    // Links the element into a SubmittedReqHashBuckets chain while submitted.
+    LIST_ENTRY HashLink;
     PVOID Srb;
     UINT64 StartingLbn;
     ULONG DataLength;
