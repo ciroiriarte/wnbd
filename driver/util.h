@@ -15,6 +15,17 @@ DrainDeviceQueue(_In_ PWNBD_DISK_DEVICE Device,
                  _In_ BOOLEAN SubmittedRequests,
                  _In_ BOOLEAN CheckStaleConn);
 
+// Bounded per-device SRB queue element pool.
+VOID
+WnbdPopulateSrbElementPool(_In_ PWNBD_DISK_DEVICE Device);
+VOID
+WnbdDrainSrbElementPool(_In_ PWNBD_DISK_DEVICE Device);
+PSRB_QUEUE_ELEMENT
+WnbdAllocSrbElement(_In_ PWNBD_DISK_DEVICE Device);
+VOID
+WnbdFreeSrbElement(_In_ PWNBD_DISK_DEVICE Device,
+                   _In_ PSRB_QUEUE_ELEMENT Element);
+
 VOID
 CompleteRequest(_In_ PWNBD_DISK_DEVICE Device,
                 _In_ PSRB_QUEUE_ELEMENT Element,

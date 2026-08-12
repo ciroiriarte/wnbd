@@ -10,6 +10,11 @@
 #include "common.h"
 #include "wnbd_ioctl.h"
 
+// Number of SRB queue elements pre-allocated per device into a bounded free
+// list, sized to cover the default per-LUN queue depth. Requests beyond this
+// fall back to direct nonpaged pool allocation.
+#define WNBD_SRB_POOL_SIZE 256
+
 typedef struct _WNBD_EXTENSION {
     UNICODE_STRING                    DeviceInterface;
     LIST_ENTRY                        DeviceList;
@@ -46,6 +51,11 @@ typedef struct _WNBD_DISK_DEVICE
     LIST_ENTRY                  SubmittedReqListHead;
     KSPIN_LOCK                  SubmittedReqListLock;
 
+    // Bounded free list of pre-allocated SRB queue elements, avoiding nonpaged
+    // pool churn on the hot dispatch/completion path. Guarded by its own lock.
+    LIST_ENTRY                  SrbElementPool;
+    KSPIN_LOCK                  SrbElementPoolLock;
+
     KSEMAPHORE                  DeviceEvent;
     PVOID                       DeviceMonitorThread;
     BOOLEAN                     HardRemoveDevice;
@@ -68,6 +78,9 @@ typedef struct _SRB_QUEUE_ELEMENT {
     UINT64 Tag;
     BOOLEAN Aborted;
     BOOLEAN Completed;
+    // TRUE if this element came from the device's pre-allocated pool and must
+    // be returned to it rather than freed to nonpaged pool.
+    BOOLEAN Pooled;
     // Retrieved using KeQueryInterruptTime.
     UINT64 ReqTimestamp;
 } SRB_QUEUE_ELEMENT, * PSRB_QUEUE_ELEMENT;

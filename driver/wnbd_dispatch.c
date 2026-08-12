@@ -410,7 +410,7 @@ Exit:
     if (!Element->Aborted) {
         CompleteRequest(Device, Element, FALSE);
     }
-    ExFreePool(Element);
+    WnbdFreeSrbElement(Device, Element);
 
     return Status;
 }

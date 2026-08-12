@@ -138,6 +138,10 @@ WnbdDeviceMonitorThread(_In_ PVOID Context)
         Device->InquiryData = NULL;
     }
 
+    // The queue drains above have completed (and returned to the pool) every
+    // outstanding element, so it is safe to free the pool itself now.
+    WnbdDrainSrbElementPool(Device);
+
     ObDereferenceObject(Device->DeviceMonitorThread);
     ExFreePool(Device);
 
@@ -158,6 +162,8 @@ WnbdInitializeDevice(_In_ PWNBD_DISK_DEVICE Device)
     KeInitializeSpinLock(&Device->PendingReqListLock);
     InitializeListHead(&Device->SubmittedReqListHead);
     KeInitializeSpinLock(&Device->SubmittedReqListLock);
+    InitializeListHead(&Device->SrbElementPool);
+    KeInitializeSpinLock(&Device->SrbElementPoolLock);
     ExInitializeRundownProtection(&Device->RundownProtection);
     KeInitializeSemaphore(&Device->DeviceEvent, 0, 1 << 30);
     KeInitializeEvent(&Device->DeviceRemovalEvent, NotificationEvent, FALSE);
@@ -176,6 +182,10 @@ WnbdInitializeDevice(_In_ PWNBD_DISK_DEVICE Device)
         Status = STATUS_INSUFFICIENT_RESOURCES;
         goto Exit;
     }
+
+    // Populated only once the monitor thread (which drains the pool on
+    // teardown) is in place, so the elements are always reclaimed.
+    WnbdPopulateSrbElementPool(Device);
 
 Exit:
     return Status;
