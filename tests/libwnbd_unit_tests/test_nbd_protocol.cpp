@@ -34,6 +34,12 @@ DWORD NbdParseOptGoReply(
     _Inout_ PUINT16 Flags,
     _Inout_ PBOOLEAN SeenExport);
 
+DWORD NbdParseInfoBlockSize(
+    _In_ UINT32 ReplyType,
+    _In_reads_bytes_opt_(DataLength) const CHAR* Data,
+    _In_ UINT32 DataLength,
+    _Inout_ PNBD_BLOCK_SIZE_INFO BlockSizeInfo);
+
 UINT32 NbdMaskClientFlags(
     _In_ UINT32 ClientFlags,
     _In_ UINT16 ServerFlags);
@@ -211,6 +217,18 @@ std::array<CHAR, 12> ExportInfo(UINT64 Size, UINT16 Flags)
            &ExportFlags,
            sizeof(ExportFlags));
 
+    return Data;
+}
+
+std::array<CHAR, 14> BlockSizeInfoPayload(
+    UINT32 Minimum, UINT32 Preferred, UINT32 Maximum)
+{
+    std::array<CHAR, 14> Data = {};
+    UINT16 Type = Swap16(NBD_INFO_BLOCK_SIZE);
+    UINT32 Values[3] = { Swap32(Minimum), Swap32(Preferred), Swap32(Maximum) };
+
+    memcpy(Data.data(), &Type, sizeof(Type));
+    memcpy(Data.data() + sizeof(Type), Values, sizeof(Values));
     return Data;
 }
 
@@ -409,6 +427,66 @@ TEST(TestNbdProtocol, ParsesValidExportInfoThenAck)
                   &Size,
                   &Flags,
                   &SeenExport));
+}
+
+TEST(TestNbdProtocol, ParsesValidBlockSizeInfo)
+{
+    auto Data = BlockSizeInfoPayload(512, 4096, 0x100000);
+    NBD_BLOCK_SIZE_INFO Info = { 0 };
+
+    EXPECT_EQ(0,
+              NbdParseInfoBlockSize(
+                  NBD_REP_INFO,
+                  Data.data(),
+                  (UINT32) Data.size(),
+                  &Info));
+    EXPECT_TRUE(Info.Received);
+    EXPECT_EQ(512u, Info.Minimum);
+    EXPECT_EQ(4096u, Info.Preferred);
+    EXPECT_EQ(0x100000u, Info.Maximum);
+}
+
+TEST(TestNbdProtocol, RejectsTruncatedBlockSizeInfo)
+{
+    auto Data = BlockSizeInfoPayload(512, 4096, 0x100000);
+    NBD_BLOCK_SIZE_INFO Info = { 0 };
+
+    EXPECT_EQ(ERROR_BAD_FORMAT,
+              NbdParseInfoBlockSize(
+                  NBD_REP_INFO,
+                  Data.data(),
+                  (UINT32) Data.size() - 1,
+                  &Info));
+    EXPECT_FALSE(Info.Received);
+}
+
+TEST(TestNbdProtocol, IgnoresNonBlockSizeInfoType)
+{
+    // An NBD_INFO_EXPORT reply must be ignored by the block-size parser
+    // without reporting an error or marking constraints as received.
+    auto Data = ExportInfo(0x1122334455667788ULL, NBD_FLAG_SEND_FLUSH);
+    NBD_BLOCK_SIZE_INFO Info = { 0 };
+
+    EXPECT_EQ(0,
+              NbdParseInfoBlockSize(
+                  NBD_REP_INFO,
+                  Data.data(),
+                  (UINT32) Data.size(),
+                  &Info));
+    EXPECT_FALSE(Info.Received);
+}
+
+TEST(TestNbdProtocol, IgnoresBlockSizeInfoOnAck)
+{
+    NBD_BLOCK_SIZE_INFO Info = { 0 };
+
+    EXPECT_EQ(0,
+              NbdParseInfoBlockSize(
+                  NBD_REP_ACK,
+                  nullptr,
+                  0,
+                  &Info));
+    EXPECT_FALSE(Info.Received);
 }
 
 TEST(TestNbdProtocol, EncodesDisconnectWithZeroOffsetAndLength)

@@ -99,13 +99,25 @@ __pragma(pack(pop))
 #define NBD_REP_FLAG_ERROR   1 << 31
 #define NBD_REP_ERR_UNSUP    1 | NBD_REP_FLAG_ERROR
 #define NBD_REP_ERR_POLICY   2 | NBD_REP_FLAG_ERROR
+#define NBD_REP_ERR_BLOCK_SIZE_REQD 8 | NBD_REP_FLAG_ERROR
 
 #define NBD_FLAG_FIXED_NEWSTYLE 1
 #define NBD_FLAG_NO_ZEROES      2
 
 #define NBD_INFO_EXPORT      0
+#define NBD_INFO_BLOCK_SIZE  3
 
 #define INIT_PASSWD           "NBDMAGIC"
+
+// Block size constraints advertised by the server through NBD_INFO_BLOCK_SIZE
+// during NBD_OPT_GO. All values are in bytes. "Received" indicates whether the
+// server actually sent the information item.
+typedef struct _NBD_BLOCK_SIZE_INFO {
+    UINT32 Minimum;
+    UINT32 Preferred;
+    UINT32 Maximum;
+    BOOLEAN Received;
+} NBD_BLOCK_SIZE_INFO, *PNBD_BLOCK_SIZE_INFO;
 
 #ifdef __cplusplus
 extern "C" {
@@ -131,7 +143,8 @@ DWORD NbdNegotiate(
     _In_ PUINT64 Size,
     _In_ PUINT16 Flags,
     _In_ std::string ExportName,
-    _In_ UINT32 ClientFlags);
+    _In_ UINT32 ClientFlags,
+    _Inout_opt_ PNBD_BLOCK_SIZE_INFO BlockSizeInfo = nullptr);
 
 DWORD NbdReadReply(
     _In_ SOCKET Fd,
