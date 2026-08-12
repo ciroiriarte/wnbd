@@ -79,6 +79,66 @@ PSRB_QUEUE_ELEMENT WnbdSubmittedReqRemoveHead(_In_ PWNBD_DISK_DEVICE Device)
     return Element;
 }
 
+// Pre-allocates the bounded per-device SRB element free list. The list head and
+// lock must already be initialized. A short allocation just yields a smaller
+// pool; the shortfall is covered by direct allocation at runtime.
+VOID WnbdPopulateSrbElementPool(_In_ PWNBD_DISK_DEVICE Device)
+{
+    for (ULONG Index = 0; Index < WNBD_SRB_POOL_SIZE; Index++) {
+        PSRB_QUEUE_ELEMENT Element = (PSRB_QUEUE_ELEMENT) ExAllocatePoolZero(
+            NonPagedPoolNx, sizeof(SRB_QUEUE_ELEMENT), 'DBNs');
+        if (!Element)
+            break;
+        Element->Pooled = TRUE;
+        ExInterlockedInsertHeadList(
+            &Device->SrbElementPool, &Element->Link,
+            &Device->SrbElementPoolLock);
+    }
+}
+
+// Frees every element currently held in the pool. Callers must ensure no
+// requests are still outstanding (all elements have been returned).
+VOID WnbdDrainSrbElementPool(_In_ PWNBD_DISK_DEVICE Device)
+{
+    PLIST_ENTRY Entry;
+    while ((Entry = ExInterlockedRemoveHeadList(
+                &Device->SrbElementPool,
+                &Device->SrbElementPoolLock)) != NULL) {
+        ExFreePool(CONTAINING_RECORD(Entry, SRB_QUEUE_ELEMENT, Link));
+    }
+}
+
+// Obtains a zeroed SRB queue element from the pool, falling back to a direct
+// nonpaged pool allocation when the pool is exhausted.
+PSRB_QUEUE_ELEMENT WnbdAllocSrbElement(_In_ PWNBD_DISK_DEVICE Device)
+{
+    PLIST_ENTRY Entry = ExInterlockedRemoveHeadList(
+        &Device->SrbElementPool, &Device->SrbElementPoolLock);
+    PSRB_QUEUE_ELEMENT Element;
+    if (Entry) {
+        Element = CONTAINING_RECORD(Entry, SRB_QUEUE_ELEMENT, Link);
+        RtlZeroMemory(Element, sizeof(SRB_QUEUE_ELEMENT));
+        Element->Pooled = TRUE;
+    } else {
+        Element = (PSRB_QUEUE_ELEMENT) ExAllocatePoolZero(
+            NonPagedPoolNx, sizeof(SRB_QUEUE_ELEMENT), 'DBNs');
+    }
+    return Element;
+}
+
+// Returns an element to the pool, or frees it if it was directly allocated.
+VOID WnbdFreeSrbElement(_In_ PWNBD_DISK_DEVICE Device,
+                        _In_ PSRB_QUEUE_ELEMENT Element)
+{
+    if (Element->Pooled) {
+        ExInterlockedInsertHeadList(
+            &Device->SrbElementPool, &Element->Link,
+            &Device->SrbElementPoolLock);
+    } else {
+        ExFreePool(Element);
+    }
+}
+
 VOID DrainDeviceQueue(_In_ PWNBD_DISK_DEVICE Device,
                       _In_ BOOLEAN SubmittedRequests,
                       _In_ BOOLEAN CheckStaleConn)
@@ -527,7 +587,7 @@ VOID CompleteRequest(
     }
 
     if (FreeElement) {
-        ExFreePool(Element);
+        WnbdFreeSrbElement(Device, Element);
     }
 }
 
