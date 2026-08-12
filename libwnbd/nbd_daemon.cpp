@@ -180,13 +180,49 @@ DWORD NbdDaemon::TryStart()
     UINT16 NbdFlags = 0;
     if (!WnbdProps.NbdProperties.Flags.SkipNegotiation) {
         uint64_t DiskSize = 0;
+        NBD_BLOCK_SIZE_INFO BlockSizeInfo = { 0 };
 
         Err = NbdNegotiate(Socket, &DiskSize, &NbdFlags,
                            WnbdProps.NbdProperties.ExportName,
-                           NBD_FLAG_FIXED_NEWSTYLE);
+                           NBD_FLAG_FIXED_NEWSTYLE,
+                           &BlockSizeInfo);
         if (Err) {
             LogError("NBD negotiation failed.");
             return Err;
+        }
+
+        if (BlockSizeInfo.Received) {
+            LogInfo("NBD server block-size constraints: minimum=%u, "
+                    "preferred=%u, maximum=%u.",
+                    BlockSizeInfo.Minimum, BlockSizeInfo.Preferred,
+                    BlockSizeInfo.Maximum);
+
+            // The block size is currently pinned to 512 bytes. Refuse the
+            // mapping if the server's constraints are incompatible rather than
+            // silently violating them.
+            if (BlockSizeInfo.Minimum > WnbdProps.BlockSize) {
+                LogError("NBD server requires a minimum block size of %u "
+                         "bytes, which exceeds the supported %u-byte block "
+                         "size.",
+                         BlockSizeInfo.Minimum, WnbdProps.BlockSize);
+                return ERROR_NOT_SUPPORTED;
+            }
+            if (BlockSizeInfo.Minimum &&
+                    (WnbdProps.BlockSize % BlockSizeInfo.Minimum)) {
+                LogError("The %u-byte block size is not a multiple of the "
+                         "server's minimum block size of %u bytes.",
+                         WnbdProps.BlockSize, BlockSizeInfo.Minimum);
+                return ERROR_NOT_SUPPORTED;
+            }
+            if (BlockSizeInfo.Maximum &&
+                    BlockSizeInfo.Maximum < WNBD_DEFAULT_MAX_TRANSFER_LENGTH) {
+                LogWarning("NBD server advertises a maximum block size of %u "
+                           "bytes, smaller than the default maximum transfer "
+                           "length of %u bytes. Large transfers may be "
+                           "rejected by the server.",
+                           BlockSizeInfo.Maximum,
+                           WNBD_DEFAULT_MAX_TRANSFER_LENGTH);
+            }
         }
 
         WnbdProps.BlockCount = DiskSize / WnbdProps.BlockSize;

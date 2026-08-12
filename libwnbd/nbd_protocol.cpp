@@ -336,6 +336,50 @@ DWORD NbdParseOptGoReply(
     return 0;
 }
 
+// Parses an NBD_INFO_BLOCK_SIZE information reply sent in response to
+// NBD_OPT_GO. Non-NBD_REP_INFO replies and info replies that carry a different
+// information type are ignored (returns 0 without touching BlockSizeInfo). A
+// truncated or oversized NBD_INFO_BLOCK_SIZE payload is rejected.
+DWORD NbdParseInfoBlockSize(
+    _In_ UINT32 ReplyType,
+    _In_reads_bytes_opt_(DataLength) const CHAR* Data,
+    _In_ UINT32 DataLength,
+    _Inout_ PNBD_BLOCK_SIZE_INFO BlockSizeInfo)
+{
+    if (!BlockSizeInfo) {
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    if (ReplyType != NBD_REP_INFO) {
+        return 0;
+    }
+
+    if (!Data || DataLength < sizeof(UINT16)) {
+        return ERROR_BAD_FORMAT;
+    }
+
+    UINT16 Type;
+    memcpy(&Type, Data, sizeof(Type));
+    big_to_native_inplace(Type);
+    if (Type != NBD_INFO_BLOCK_SIZE) {
+        return 0;
+    }
+
+    // Type (UINT16) followed by minimum, preferred and maximum block sizes,
+    // each a big-endian UINT32.
+    if (DataLength != sizeof(Type) + 3 * sizeof(UINT32)) {
+        return ERROR_BAD_FORMAT;
+    }
+
+    UINT32 Values[3];
+    memcpy(Values, Data + sizeof(Type), sizeof(Values));
+    BlockSizeInfo->Minimum = big_to_native(Values[0]);
+    BlockSizeInfo->Preferred = big_to_native(Values[1]);
+    BlockSizeInfo->Maximum = big_to_native(Values[2]);
+    BlockSizeInfo->Received = TRUE;
+    return 0;
+}
+
 UINT32 NbdMaskClientFlags(
     _In_ UINT32 ClientFlags,
     _In_ UINT16 ServerFlags)
@@ -406,7 +450,8 @@ DWORD NbdNegotiate(
     _In_ PUINT64 Size,
     _In_ PUINT16 Flags,
     _In_ std::string ExportName,
-    _In_ UINT32 ClientFlags)
+    _In_ UINT32 ClientFlags,
+    _Inout_opt_ PNBD_BLOCK_SIZE_INFO BlockSizeInfo)
 {
     UINT64 Magic = 0;
     UINT16 GFlags = 0;
@@ -467,7 +512,17 @@ DWORD NbdNegotiate(
 
     PNBD_HANDSHAKE_RPL Reply = NULL;
     BOOLEAN SeenExport = FALSE;
-    Retval = NbdSendInfoRequest(Fd, NBD_OPT_GO, 0, NULL, ExportName);
+    // Request the export details as well as the block-size constraints. The
+    // request identifiers are sent verbatim, so they must already be in
+    // big-endian byte order.
+    UINT16 InfoRequests[] = {
+        native_to_big((UINT16) NBD_INFO_EXPORT),
+        native_to_big((UINT16) NBD_INFO_BLOCK_SIZE),
+    };
+    Retval = NbdSendInfoRequest(
+        Fd, NBD_OPT_GO,
+        (USHORT) (sizeof(InfoRequests) / sizeof(InfoRequests[0])),
+        InfoRequests, ExportName);
     if (Retval) {
         LogError("Could not send NBD handshake request.");
         return Retval;
@@ -507,6 +562,14 @@ DWORD NbdNegotiate(
                 }
                 free(Reply);
                 return ERROR_ACCESS_DENIED;
+            case NBD_REP_ERR_BLOCK_SIZE_REQD:
+                // The client already requests NBD_INFO_BLOCK_SIZE, so this
+                // should not happen; surface it clearly if a server still
+                // rejects the mapping over block-size constraints.
+                LogError("Server requires the client to honor block-size "
+                         "constraints (NBD_REP_ERR_BLOCK_SIZE_REQD).");
+                free(Reply);
+                return ERROR_NOT_SUPPORTED;
             default:
                 if (Reply->Datasize > 0) {
                      // ensure that the log message is null terminated.
@@ -532,6 +595,19 @@ DWORD NbdNegotiate(
             LogError("Malformed NBD_OPT_GO reply.");
             free(Reply);
             return Retval;
+        }
+
+        if (BlockSizeInfo) {
+            Retval = NbdParseInfoBlockSize(
+                Reply->ReplyType,
+                Reply->Data,
+                Reply->Datasize,
+                BlockSizeInfo);
+            if (Retval) {
+                LogError("Malformed NBD_INFO_BLOCK_SIZE reply.");
+                free(Reply);
+                return Retval;
+            }
         }
 
         if (Reply->ReplyType == NBD_REP_ACK) {

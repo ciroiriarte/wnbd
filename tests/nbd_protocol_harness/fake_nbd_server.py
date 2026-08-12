@@ -42,7 +42,15 @@ NBD_OPT_EXPORT_NAME = 1
 NBD_OPT_GO = 7
 NBD_REP_ACK = 1
 NBD_REP_INFO = 3
+NBD_REP_FLAG_ERROR = 1 << 31
+NBD_REP_ERR_BLOCK_SIZE_REQD = 8 | NBD_REP_FLAG_ERROR
 NBD_INFO_EXPORT = 0
+NBD_INFO_BLOCK_SIZE = 3
+
+# Block-size constraints advertised to clients that request NBD_INFO_BLOCK_SIZE.
+BLOCK_SIZE_MINIMUM = 512
+BLOCK_SIZE_PREFERRED = 4096
+BLOCK_SIZE_MAXIMUM = 0  # 0 means "no server-imposed maximum".
 
 NBD_CMD_READ = 0
 NBD_CMD_WRITE = 1
@@ -63,6 +71,7 @@ class Scenario(enum.Enum):
     INVALID_INIT_MAGIC = "invalid-init-magic"
     ACK_WITHOUT_EXPORT = "ack-without-export"
     TRUNCATED_INFO = "truncated-info"
+    BLOCK_SIZE_REQD = "block-size-reqd"
 
 
 @dataclass(frozen=True)
@@ -111,6 +120,29 @@ def export_info_payload(size: int, flags: int) -> bytes:
     return struct.pack(">H Q H", NBD_INFO_EXPORT, size, flags)
 
 
+def block_size_info_payload(minimum: int, preferred: int, maximum: int) -> bytes:
+    return struct.pack(">H III", NBD_INFO_BLOCK_SIZE, minimum, preferred, maximum)
+
+
+def parse_go_requested_info(payload: bytes) -> list[int]:
+    # NBD_OPT_GO payload: name length (u32), name, number of info requests
+    # (u16), then that many info request ids (u16 each).
+    if len(payload) < 4:
+        raise AssertionError("truncated NBD_OPT_GO payload")
+    name_len = struct.unpack(">I", payload[:4])[0]
+    offset = 4 + name_len
+    if len(payload) < offset + 2:
+        raise AssertionError("truncated NBD_OPT_GO info request count")
+    count = struct.unpack(">H", payload[offset:offset + 2])[0]
+    offset += 2
+    if len(payload) < offset + count * 2:
+        raise AssertionError("truncated NBD_OPT_GO info request list")
+    return [
+        struct.unpack(">H", payload[offset + i * 2:offset + i * 2 + 2])[0]
+        for i in range(count)
+    ]
+
+
 def send_simple_reply(conn: socket.socket, cookie: int, error: int = 0) -> None:
     conn.sendall(struct.pack(">IIQ", NBD_REPLY_MAGIC, error, cookie))
 
@@ -146,6 +178,14 @@ def perform_handshake(conn: socket.socket, scenario: Scenario, export_size: int)
     if option != NBD_OPT_GO:
         raise AssertionError(f"expected NBD_OPT_GO, got {option}")
 
+    requested_info = parse_go_requested_info(payload)
+
+    if scenario == Scenario.BLOCK_SIZE_REQD:
+        # Reject clients that do not request NBD_INFO_BLOCK_SIZE, mirroring a
+        # server that enforces non-default block-size constraints.
+        if NBD_INFO_BLOCK_SIZE not in requested_info:
+            send_option_reply(conn, option, NBD_REP_ERR_BLOCK_SIZE_REQD)
+            return
     if scenario == Scenario.ACK_WITHOUT_EXPORT:
         send_option_reply(conn, option, NBD_REP_ACK)
         return
@@ -154,6 +194,13 @@ def perform_handshake(conn: socket.socket, scenario: Scenario, export_size: int)
         return
 
     send_option_reply(conn, option, NBD_REP_INFO, export_info_payload(export_size, NBD_FLAG_HAS_FLAGS | NBD_FLAG_SEND_FLUSH | NBD_FLAG_SEND_TRIM | NBD_FLAG_SEND_FUA))
+    # Only advertise block-size constraints when the client asked for them, so
+    # clients that do not request NBD_INFO_BLOCK_SIZE keep working unchanged.
+    if NBD_INFO_BLOCK_SIZE in requested_info:
+        send_option_reply(
+            conn, option, NBD_REP_INFO,
+            block_size_info_payload(
+                BLOCK_SIZE_MINIMUM, BLOCK_SIZE_PREFERRED, BLOCK_SIZE_MAXIMUM))
     send_option_reply(conn, option, NBD_REP_ACK)
 
 
@@ -354,6 +401,55 @@ def self_test() -> int:
         finally:
             if invalid_proc.poll() is None:
                 invalid_proc.kill()
+
+        block_size_proc = subprocess.Popen(
+            [sys.executable, __file__, "--port", "0", "--scenario", "record", "--max-requests", "1"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            block_size_port = read_listening_port(block_size_proc)
+            with socket.create_connection(("127.0.0.1", block_size_port), timeout=2) as conn:
+                if recv_exact(conn, 8) != INIT_PASSWD:
+                    raise AssertionError("bad server initial magic")
+                magic, flags = struct.unpack(">QH", recv_exact(conn, 10))
+                if magic != OPTION_MAGIC or not (flags & NBD_FLAG_FIXED_NEWSTYLE):
+                    raise AssertionError("bad server newstyle prefix")
+                conn.sendall(struct.pack(">I", NBD_FLAG_FIXED_NEWSTYLE))
+                info_ids = struct.pack(">HH", NBD_INFO_EXPORT, NBD_INFO_BLOCK_SIZE)
+                payload = struct.pack(">I", 4) + b"test" + struct.pack(">H", 2) + info_ids
+                conn.sendall(struct.pack(">QII", OPTION_MAGIC, NBD_OPT_GO, len(payload)) + payload)
+                saw_block_size = False
+                while True:
+                    _, _, reply_type, length = struct.unpack(">QIII", recv_exact(conn, 20))
+                    data = recv_exact(conn, length)
+                    if reply_type == NBD_REP_ACK:
+                        break
+                    if reply_type == NBD_REP_INFO and length >= 2:
+                        info_type = struct.unpack(">H", data[:2])[0]
+                        if info_type == NBD_INFO_BLOCK_SIZE:
+                            if length != 14:
+                                raise AssertionError("bad NBD_INFO_BLOCK_SIZE length")
+                            minimum, preferred, maximum = struct.unpack(">III", data[2:14])
+                            if (minimum, preferred, maximum) != (
+                                BLOCK_SIZE_MINIMUM, BLOCK_SIZE_PREFERRED, BLOCK_SIZE_MAXIMUM
+                            ):
+                                raise AssertionError("unexpected block-size constraints")
+                            saw_block_size = True
+                if not saw_block_size:
+                    raise AssertionError(
+                        "server did not advertise NBD_INFO_BLOCK_SIZE when requested")
+                conn.sendall(struct.pack(">IHHQQI", NBD_REQUEST_MAGIC, 0, NBD_CMD_FLUSH, 1, 0, 0))
+                recv_exact(conn, 16)
+            block_size_rc = block_size_proc.wait(timeout=2)
+            if block_size_rc:
+                raise AssertionError(
+                    block_size_proc.stderr.read() if block_size_proc.stderr
+                    else f"server exited {block_size_rc}")
+        finally:
+            if block_size_proc.poll() is None:
+                block_size_proc.kill()
 
         print("fake NBD server self-test OK")
         return 0
