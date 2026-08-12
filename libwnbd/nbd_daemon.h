@@ -35,6 +35,7 @@ private:
     bool NbdTransmissionStarted = false;
 
     std::mutex ShutdownLock;
+    std::mutex SendLock;
     bool Terminated = false;
     bool TerminateInProgress = false;
     PWNBD_DISK WnbdDisk = nullptr;

@@ -105,6 +105,7 @@ DWORD NbdDaemon::DisconnectNbd()
 
         DWORD Err = 0;
         if (NbdTransmissionStarted) {
+            std::unique_lock Lock{SendLock};
             Err = NbdRequest(Socket, 0, 0, 0, NBD_CMD_DISC);
             if (Err) {
                 Retval = Err;
@@ -328,12 +329,16 @@ void NbdDaemon::Read(
     }
 
     // NBD doesn't currently support read FUA.
-    DWORD Err = NbdRequest(
-        Handler->Socket,
-        BlockAddress * Handler->WnbdProps.BlockSize,
-        BlockCount * Handler->WnbdProps.BlockSize,
-        RequestHandle,
-        NBD_CMD_READ);
+    DWORD Err;
+    {
+        std::unique_lock Lock{Handler->SendLock};
+        Err = NbdRequest(
+            Handler->Socket,
+            BlockAddress * Handler->WnbdProps.BlockSize,
+            BlockCount * Handler->WnbdProps.BlockSize,
+            RequestHandle,
+            NBD_CMD_READ);
+    }
     if (Err) {
         // TODO: try resetting the connection instead.
         LogError("Couldn't submit read request. Closing connection.");
@@ -370,13 +375,17 @@ void NbdDaemon::Write(
         ));
     }
 
-    DWORD Err = NbdSendWrite(
-        Handler->Socket,
-        BlockAddress * Handler->WnbdProps.BlockSize,
-        BlockCount * Handler->WnbdProps.BlockSize,
-        Buffer,
-        RequestHandle,
-        NbdTransmissionFlags);
+    DWORD Err;
+    {
+        std::unique_lock Lock{Handler->SendLock};
+        Err = NbdSendWrite(
+            Handler->Socket,
+            BlockAddress * Handler->WnbdProps.BlockSize,
+            BlockCount * Handler->WnbdProps.BlockSize,
+            Buffer,
+            RequestHandle,
+            NbdTransmissionFlags);
+    }
     if (Err) {
         // TODO: try resetting the connection instead.
         LogError("Couldn't submit write request. Closing connection.");
@@ -406,12 +415,16 @@ void NbdDaemon::Flush(
         ));
     }
 
-    DWORD Err = NbdRequest(
-        Handler->Socket,
-        0,
-        0,
-        RequestHandle,
-        NBD_CMD_FLUSH);
+    DWORD Err;
+    {
+        std::unique_lock Lock{Handler->SendLock};
+        Err = NbdRequest(
+            Handler->Socket,
+            0,
+            0,
+            RequestHandle,
+            NBD_CMD_FLUSH);
+    }
     if (Err) {
         // TODO: try resetting the connection instead.
         LogError("Couldn't submit flush request. Closing connection.");
@@ -442,12 +455,16 @@ void NbdDaemon::Unmap(
         ));
     }
 
-    DWORD Err = NbdRequest(
-        Handler->Socket,
-        Descriptors[0].BlockAddress * Handler->WnbdProps.BlockSize,
-        Descriptors[0].BlockCount * Handler->WnbdProps.BlockSize,
-        RequestHandle,
-        NBD_CMD_TRIM);
+    DWORD Err;
+    {
+        std::unique_lock Lock{Handler->SendLock};
+        Err = NbdRequest(
+            Handler->Socket,
+            Descriptors[0].BlockAddress * Handler->WnbdProps.BlockSize,
+            Descriptors[0].BlockCount * Handler->WnbdProps.BlockSize,
+            RequestHandle,
+            NBD_CMD_TRIM);
+    }
     if (Err) {
         // TODO: try resetting the connection instead.
         LogError("Couldn't submit unmap request. Closing connection.");
