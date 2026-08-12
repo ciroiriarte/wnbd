@@ -21,6 +21,6 @@ python tests\nbd_protocol_harness\fake_nbd_server.py --port 10809 --scenario ass
 ```
 
 The PR workflow runs `--self-test` to prove the harness can perform a loopback
-handshake and record a request. Future GoogleTest integration should launch this
-harness as a child process, wait for its listening port, run `WnbdRunNbdDaemon`
-against it, and assert the harness exit code for each scenario.
+handshake and record a request. The Windows test workflow also launches this
+harness for real `libwnbd_tests.exe` coverage of DISC, FLUSH, full I/O,
+malformed negotiation, and disconnect/error race scenarios.

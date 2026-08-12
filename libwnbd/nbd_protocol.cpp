@@ -371,13 +371,6 @@ size_t NbdGetDefaultPendingRequestsReserve()
     return 1024;
 }
 
-ULONG NbdGetWritePayloadStagingCopySize(
-    _In_ ULONG Length)
-{
-    UNREFERENCED_PARAMETER(Length);
-    return 0;
-}
-
 DWORD NbdSendOptExportName(
     _In_ SOCKET Fd,
     _In_ PUINT64 Size,

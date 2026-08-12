@@ -3,7 +3,9 @@
 #include "nbd_protocol.h"
 
 #include <array>
+#include <memory>
 #include <unordered_map>
+#include <vector>
 
 typedef DWORD (*NbdRecvExactFn)(
     _In_ SOCKET Fd,
@@ -46,8 +48,13 @@ DWORD NbdGetReadResponseBufferSize(
 
 size_t NbdGetDefaultPendingRequestsReserve();
 
-ULONG NbdGetWritePayloadStagingCopySize(
-    _In_ ULONG Length);
+DWORD NbdSendWrite(
+    _In_ SOCKET Fd,
+    _In_ UINT64 Offset,
+    _In_ ULONG Length,
+    _In_ PVOID Data,
+    _In_ UINT64 Handle,
+    _In_ UINT32 NbdTransmissionFlags);
 
 void NbdEncodeRequest(
     _Out_ PNBD_REQUEST Request,
@@ -82,6 +89,113 @@ UINT64 Swap64(UINT64 Value)
            ((Value & 0x0000ff0000000000ULL) >> 24) |
            ((Value & 0x00ff000000000000ULL) >> 40) |
            ((Value & 0xff00000000000000ULL) >> 56);
+}
+
+
+class WinsockSession {
+private:
+    WSADATA WsaData = {};
+    bool Started = false;
+
+public:
+    WinsockSession()
+    {
+        // ASSERT_* can't be used here: it expands to `return;`, which MSVC
+        // rejects inside a constructor (C2534).
+        int Err = WSAStartup(MAKEWORD(2, 2), &WsaData);
+        EXPECT_EQ(0, Err) << "WSAStartup failed: " << Err;
+        Started = (Err == 0);
+    }
+
+    ~WinsockSession()
+    {
+        if (Started) {
+            WSACleanup();
+        }
+    }
+};
+
+struct LoopbackSockets {
+    SOCKET Client = INVALID_SOCKET;
+    SOCKET Server = INVALID_SOCKET;
+
+    LoopbackSockets() = default;
+    LoopbackSockets(const LoopbackSockets&) = delete;
+    LoopbackSockets& operator=(const LoopbackSockets&) = delete;
+    LoopbackSockets(LoopbackSockets&& Other) noexcept
+    {
+        Client = Other.Client;
+        Server = Other.Server;
+        Other.Client = INVALID_SOCKET;
+        Other.Server = INVALID_SOCKET;
+    }
+    LoopbackSockets& operator=(LoopbackSockets&& Other) noexcept
+    {
+        if (this != &Other) {
+            if (Client != INVALID_SOCKET) {
+                closesocket(Client);
+            }
+            if (Server != INVALID_SOCKET) {
+                closesocket(Server);
+            }
+            Client = Other.Client;
+            Server = Other.Server;
+            Other.Client = INVALID_SOCKET;
+            Other.Server = INVALID_SOCKET;
+        }
+        return *this;
+    }
+
+    ~LoopbackSockets()
+    {
+        if (Client != INVALID_SOCKET) {
+            closesocket(Client);
+        }
+        if (Server != INVALID_SOCKET) {
+            closesocket(Server);
+        }
+    }
+};
+
+LoopbackSockets CreateLoopbackSockets()
+{
+    SOCKET Listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    EXPECT_NE(INVALID_SOCKET, Listener);
+
+    sockaddr_in Address = {};
+    Address.sin_family = AF_INET;
+    Address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    Address.sin_port = 0;
+    EXPECT_EQ(0, bind(Listener, (sockaddr*) &Address, sizeof(Address)));
+    EXPECT_EQ(0, listen(Listener, 1));
+
+    int AddressLength = sizeof(Address);
+    EXPECT_EQ(0, getsockname(Listener, (sockaddr*) &Address, &AddressLength));
+
+    LoopbackSockets Sockets;
+    Sockets.Client = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    EXPECT_NE(INVALID_SOCKET, Sockets.Client);
+    EXPECT_EQ(0, connect(Sockets.Client, (sockaddr*) &Address, AddressLength));
+
+    Sockets.Server = accept(Listener, nullptr, nullptr);
+    EXPECT_NE(INVALID_SOCKET, Sockets.Server);
+    closesocket(Listener);
+
+    DWORD TimeoutMs = 2000;
+    EXPECT_EQ(0, setsockopt(Sockets.Server, SOL_SOCKET, SO_RCVTIMEO,
+                            (const char*) &TimeoutMs, sizeof(TimeoutMs)));
+    return Sockets;
+}
+
+void RecvExactForTest(SOCKET Socket, void* Buffer, size_t Length)
+{
+    char* Cursor = (char*) Buffer;
+    while (Length) {
+        int Received = recv(Socket, Cursor, (int) Length, 0);
+        ASSERT_GT(Received, 0) << "recv failed: " << WSAGetLastError();
+        Cursor += Received;
+        Length -= Received;
+    }
 }
 
 std::array<CHAR, 12> ExportInfo(UINT64 Size, UINT16 Flags)
@@ -362,12 +476,36 @@ TEST(TestNbdProtocolPerformance, ReadResponseRejectsOversizedRequest)
               NbdGetReadResponseBufferSize(1, 1, nullptr));
 }
 
-TEST(TestNbdProtocolPerformance, WritePathDoesNotStagePayloadCopy)
+TEST(TestNbdProtocolPerformance, WritePathSendsHeaderAndPayload)
 {
-    EXPECT_EQ(0UL, NbdGetWritePayloadStagingCopySize(0));
-    EXPECT_EQ(0UL, NbdGetWritePayloadStagingCopySize(4096));
-    EXPECT_EQ(0UL,
-              NbdGetWritePayloadStagingCopySize(2 * 1024 * 1024));
+    WinsockSession Winsock;
+    auto Sockets = CreateLoopbackSockets();
+    std::vector<CHAR> Payload(4096, 0x5a);
+
+    ASSERT_EQ(0, NbdSendWrite(Sockets.Client,
+                              512,
+                              (ULONG) Payload.size(),
+                              Payload.data(),
+                              0x1122334455667788ULL,
+                              NBD_CMD_FLAG_FUA));
+    shutdown(Sockets.Client, SD_SEND);
+
+    NBD_REQUEST Request = {};
+    RecvExactForTest(Sockets.Server, &Request, sizeof(Request));
+    EXPECT_EQ((UINT32) NBD_REQUEST_MAGIC, Swap32(Request.Magic));
+    EXPECT_EQ((UINT32) (NBD_CMD_WRITE | NBD_CMD_FLAG_FUA),
+              Swap32(Request.Type));
+    // The NBD handle/cookie is opaque: it is sent verbatim (host order, not
+    // byte-swapped) and echoed back unchanged by the server.
+    EXPECT_EQ(0x1122334455667788ULL, Request.Handle);
+    EXPECT_EQ(512ULL, Swap64(Request.From));
+    EXPECT_EQ(Payload.size(), Swap32(Request.Length));
+
+    std::vector<CHAR> ReceivedPayload(Payload.size());
+    RecvExactForTest(Sockets.Server,
+                     ReceivedPayload.data(),
+                     ReceivedPayload.size());
+    EXPECT_EQ(Payload, ReceivedPayload);
 }
 
 TEST(TestNbdProtocolPerformance, PendingRequestReserveAvoidsExpectedRehash)

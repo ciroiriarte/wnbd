@@ -13,8 +13,35 @@
 #include <atomic>
 #include <memory>
 #include <thread>
+#include <vector>
 
 using namespace std;
+
+void FillNbdProperties(PWNBD_PROPERTIES WnbdProps, std::string& InstanceName)
+{
+    string NbdExportName = GetOpt<string>("nbd-export-name");
+    string NbdHostName = GetOpt<string>("nbd-hostname");
+    DWORD NbdPort = GetOpt<DWORD>("nbd-port");
+
+    if (NbdExportName.empty()) {
+        throw runtime_error("missing NBD export");
+    }
+    if (NbdHostName.empty()) {
+        throw runtime_error("missing NBD server address");
+    }
+
+    InstanceName = GetNewInstanceName();
+    InstanceName.copy(WnbdProps->InstanceName, WNBD_MAX_NAME_LENGTH);
+    string(WNBD_OWNER_NAME).copy(WnbdProps->Owner, WNBD_MAX_OWNER_LENGTH);
+
+    WnbdProps->Flags.UseUserspaceNbd = 1;
+
+    NbdHostName.copy(WnbdProps->NbdProperties.Hostname,
+                     WNBD_MAX_NAME_LENGTH);
+    NbdExportName.copy(WnbdProps->NbdProperties.ExportName,
+                       WNBD_MAX_NAME_LENGTH);
+    WnbdProps->NbdProperties.PortNumber = NbdPort;
+}
 
 class NbdMapping {
 private:
@@ -23,29 +50,7 @@ private:
 
 public:
     NbdMapping(PWNBD_PROPERTIES WnbdProps) {
-        string NbdExportName = GetOpt<string>("nbd-export-name");
-        string NbdHostName = GetOpt<string>("nbd-hostname");
-        DWORD NbdPort = GetOpt<DWORD>("nbd-port");
-
-        if (NbdExportName.empty()) {
-            throw runtime_error("missing NBD export");
-        }
-        if (NbdHostName.empty()) {
-            throw runtime_error("missing NBD server address");
-        }
-
-        // Fill the WNBD_PROPERTIES strucure
-        InstanceName = GetNewInstanceName();
-        InstanceName.copy(WnbdProps->InstanceName, WNBD_MAX_NAME_LENGTH);
-        string(WNBD_OWNER_NAME).copy(WnbdProps->Owner, WNBD_MAX_OWNER_LENGTH);
-
-        WnbdProps->Flags.UseUserspaceNbd = 1;
-
-        NbdHostName.copy(WnbdProps->NbdProperties.Hostname,
-                         WNBD_MAX_NAME_LENGTH);
-        NbdExportName.copy(WnbdProps->NbdProperties.ExportName,
-                           WNBD_MAX_NAME_LENGTH);
-        WnbdProps->NbdProperties.PortNumber = NbdPort;
+        FillNbdProperties(WnbdProps, InstanceName);
 
         NbdDaemonThread = std::thread([&]{
             WNBD_PROPERTIES Props = *WnbdProps;
@@ -103,6 +108,21 @@ void WriteSingleNbdBlock(HANDLE DiskHandle, DWORD BlockSize)
 
     LARGE_INTEGER Offset = { 0 };
     ASSERT_TRUE(SetFilePointerEx(DiskHandle, Offset, NULL, FILE_BEGIN));
+}
+
+bool WaitForFile(const char* Path, DWORD TimeoutMs)
+{
+    DWORD RemainingMs = TimeoutMs;
+    while (RemainingMs) {
+        DWORD Attributes = GetFileAttributesA(Path);
+        if (Attributes != INVALID_FILE_ATTRIBUTES &&
+                !(Attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            return true;
+        }
+        Sleep(100);
+        RemainingMs = RemainingMs > 100 ? RemainingMs - 100 : 0;
+    }
+    return false;
 }
 
 const char* GetMissingNbdParamReason() {
@@ -181,6 +201,19 @@ TEST(TestNbd, TestFlush) {
 }
 
 
+TEST(TestNbdHandshakeFailures, NegotiationFailureReturnsError) {
+    if (const char* SkipReason = GetMissingNbdParamReason()) {
+        WNBD_GTEST_SKIP(SkipReason);
+    }
+
+    WNBD_PROPERTIES WnbdProps = { 0 };
+    std::string InstanceName;
+    FillNbdProperties(&WnbdProps, InstanceName);
+
+    DWORD Status = WnbdRunNbdDaemon(&WnbdProps);
+    EXPECT_NE(0UL, Status) << "malformed NBD negotiation unexpectedly mapped";
+}
+
 TEST(TestNbdFailures, ReadFailureAfterWriteCompletes) {
     if (const char* SkipReason = GetMissingNbdParamReason()) {
         WNBD_GTEST_SKIP(SkipReason);
@@ -235,24 +268,56 @@ TEST(TestNbdFailures, RemovalWhileReadIsStalledCompletes) {
 
     WriteSingleNbdBlock(DiskHandle, BlockSize);
 
-    unique_ptr<void, decltype(&free)> ReadBuffer(malloc(BlockSize), free);
-    ASSERT_TRUE(ReadBuffer.get()) << "couldn't allocate: " << BlockSize;
+    const int ReadCount = 4;
+    std::vector<std::unique_ptr<void, decltype(&free)>> ReadBuffers;
+    std::vector<HANDLE> ReadHandles;
+    std::atomic<int> ReadFinished { 0 };
+    std::vector<BOOL> ReadSucceeded(ReadCount, TRUE);
+    std::vector<DWORD> BytesRead(ReadCount, 0);
+    std::vector<std::thread> ReadThreads;
 
-    std::atomic<bool> ReadFinished = false;
-    BOOL ReadSucceeded = TRUE;
-    DWORD BytesRead = 0;
-    std::thread ReadThread([&] {
-        ReadSucceeded = ReadFile(DiskHandle, ReadBuffer.get(), BlockSize,
-                                 &BytesRead, NULL);
-        ReadFinished = true;
-    });
+    for (int Index = 0; Index < ReadCount; ++Index) {
+        ReadBuffers.emplace_back(malloc(BlockSize), free);
+        ASSERT_TRUE(ReadBuffers.back().get())
+            << "couldn't allocate: " << BlockSize;
+        HANDLE ReadHandle = OpenNbdDisk(Mapping->GetInstanceName(), GENERIC_READ);
+        ASSERT_NE(INVALID_HANDLE_VALUE, ReadHandle)
+            << "couldn't open read handle, error: " << WinStrError(GetLastError());
+        ReadHandles.push_back(ReadHandle);
 
-    Sleep(1000);
+        ReadThreads.emplace_back([&, Index] {
+            ReadSucceeded[Index] = ReadFile(ReadHandles[Index],
+                                            ReadBuffers[Index].get(),
+                                            BlockSize,
+                                            &BytesRead[Index],
+                                            NULL);
+            ++ReadFinished;
+        });
+    }
+
+    const char* StallMarker = getenv("WNBD_STALL_MARKER");
+    ASSERT_TRUE(StallMarker && StallMarker[0])
+        << "WNBD_STALL_MARKER must be set for deterministic stall tests";
+    ASSERT_TRUE(WaitForFile(StallMarker, 10000))
+        << "fake server did not confirm a stalled read";
+
     Mapping.reset();
 
-    EVENTUALLY(ReadFinished.load(), 40, 250);
-    ReadThread.join();
-    EXPECT_FALSE(ReadSucceeded) << "stalled read unexpectedly succeeded";
+    EVENTUALLY(ReadFinished.load() == ReadCount, 40, 250);
+    for (auto& Thread: ReadThreads) {
+        Thread.join();
+    }
+    for (HANDLE ReadHandle: ReadHandles) {
+        CloseHandle(ReadHandle);
+    }
+    for (int Index = 0; Index < ReadCount; ++Index) {
+        EXPECT_FALSE(ReadSucceeded[Index])
+            << "stalled read " << Index << " unexpectedly succeeded";
+    }
+
+    WNBD_CONNECTION_INFO RemovedInfo = { 0 };
+    EXPECT_EQ(ERROR_FILE_NOT_FOUND,
+              WnbdShow(WnbdProps.InstanceName, &RemovedInfo));
 }
 
 TEST(TestNbd, TestIO) {

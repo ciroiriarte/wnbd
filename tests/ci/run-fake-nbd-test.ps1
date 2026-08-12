@@ -16,7 +16,8 @@ New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 $ServerStdout = Join-Path $OutputDir "fake-nbd-$Scenario.out.log"
 $ServerStderr = Join-Path $OutputDir "fake-nbd-$Scenario.err.log"
 $TestXml = Join-Path $OutputDir "fake-nbd-$Scenario.xml"
-Remove-Item $ServerStdout, $ServerStderr, $TestXml -ErrorAction SilentlyContinue
+$StallMarker = Join-Path $OutputDir "fake-nbd-$Scenario.stall"
+Remove-Item $ServerStdout, $ServerStderr, $TestXml, $StallMarker -ErrorAction SilentlyContinue
 
 $ServerArgs = @(
   "tests\nbd_protocol_harness\fake_nbd_server.py",
@@ -25,6 +26,11 @@ $ServerArgs = @(
   "--scenario", $Scenario,
   "--max-requests", "512"
 ) + $ExtraServerArgs
+
+if ($Scenario -eq "stall-after-write-read") {
+  $ServerArgs += @("--stall-marker", $StallMarker)
+  $env:WNBD_STALL_MARKER = (Resolve-Path $OutputDir).Path + "\fake-nbd-$Scenario.stall"
+}
 
 $Server = Start-Process `
   -FilePath $PythonExecutable `
@@ -77,6 +83,9 @@ try {
   }
 }
 finally {
+  if ($Scenario -eq "stall-after-write-read") {
+    Remove-Item Env:\WNBD_STALL_MARKER -ErrorAction SilentlyContinue
+  }
   if (!$Server.HasExited) {
     Stop-Process -Id $Server.Id -Force
   }

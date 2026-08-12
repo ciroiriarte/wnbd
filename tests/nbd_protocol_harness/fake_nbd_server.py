@@ -19,6 +19,7 @@ import struct
 import subprocess
 import sys
 import time
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
@@ -172,6 +173,11 @@ def in_bounds(req: NbdRequest, export_size: int) -> bool:
     return req.offset <= export_size and req.length <= export_size - req.offset
 
 
+def write_marker(path: str, content: str) -> None:
+    if path:
+        Path(path).write_text(content, encoding="utf-8")
+
+
 def wait_for_peer_close(conn: socket.socket, timeout: float) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -243,6 +249,8 @@ def serve(args: argparse.Namespace) -> int:
                         send_simple_reply(conn, req.cookie, errno.EIO)
                         return 0
                     if fault_armed and scenario == Scenario.STALL_AFTER_WRITE_READ:
+                        write_marker(args.stall_marker,
+                                     f"stalled-read offset={req.offset} length={req.length}\n")
                         wait_for_peer_close(conn, args.stall_seconds)
                         return 0
                     if not in_bounds(req, args.export_size):
@@ -281,6 +289,7 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser.add_argument("--export-size", type=int, default=64 * 1024 * 1024)
     parser.add_argument("--max-requests", type=int, default=128)
     parser.add_argument("--stall-seconds", type=float, default=5.0)
+    parser.add_argument("--stall-marker", default="")
     parser.add_argument("--scenario", choices=[s.value for s in Scenario], default=Scenario.RECORD.value)
     parser.add_argument("--self-test", action="store_true", help="run a loopback harness smoke test and exit")
     return parser.parse_args(argv)

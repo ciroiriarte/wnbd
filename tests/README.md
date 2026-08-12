@@ -39,28 +39,28 @@ because that mock still starts WNBD dispatchers and uses the installed driver.
 
 ## Protocol coverage roadmap
 
-Use `nbd_protocol_harness/fake_nbd_server.py` or an equivalent in-process C++
-server to add regression tests for:
+Implemented deterministic protocol checks cover:
 
 - graceful shutdown sends `NBD_CMD_DISC`;
 - `NBD_CMD_FLUSH` uses zero offset and length;
 - invalid `NBDMAGIC` is rejected;
-- unsupported oldstyle handshake is rejected clearly;
 - fixed-newstyle client flag is masked against server-advertised flags;
 - `NBD_OPT_GO` rejects truncated info payloads;
-- `NBD_INFO_EXPORT` is required before ACK;
+- `NBD_INFO_EXPORT` is required before ACK.
+
+Remaining protocol coverage candidates:
+
+- unsupported oldstyle handshake is rejected clearly;
 - `NBD_INFO_BLOCK_SIZE` constraints are requested and parsed.
 
 ## Negative integration roadmap
 
-Add driver-backed tests for:
+Implemented fake-server integration checks cover abrupt disconnect, stalled reads
+with several outstanding requests, disk removal while I/O is in flight,
+unexpected reply handles, short read payloads, and backend NBD error replies.
 
-- abrupt TCP disconnect while I/O is pending;
-- server stalls with many outstanding requests;
-- disk removal while I/O is in flight;
-- unexpected reply handles;
-- short read payloads;
-- backend NBD error replies;
+Remaining driver-backed negative coverage candidates:
+
 - unsupported flush/unmap feature flags.
 
 ## Performance regression coverage
@@ -79,10 +79,8 @@ Implemented deterministic structural checks:
 Avoid wall-clock timing gates on shared CI runners. Prefer deterministic counters
 and structural assertions, such as:
 
-- write path avoids an extra full-payload copy once scatter/gather is added;
 - submitted request lookup reports O(1) path usage once indexed;
-- lookaside/pool miss counters are bounded;
-- pending request table does not rehash in the hot path.
+- lookaside/pool miss counters are bounded.
 
 ## Driver verification roadmap
 

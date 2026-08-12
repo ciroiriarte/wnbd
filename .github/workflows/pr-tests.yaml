@@ -2,6 +2,9 @@ name: Pull Request tests
 on:
   pull_request:
     branches: [ main ]
+  push:
+    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   protocol-harness-smoke:
@@ -118,6 +121,21 @@ jobs:
           -GTestFilter TestNbd.TestIO
           -Port 10812
           -OutputDir ci-artifacts
+      - name: "Run fake NBD malformed negotiation tests"
+        run: |
+          $scenarios = @(
+            @{ Name = "ack-without-export"; Port = 10818 },
+            @{ Name = "truncated-info"; Port = 10819 }
+          )
+          foreach ($scenario in $scenarios) {
+            powershell -ExecutionPolicy Bypass -File tests\ci\run-fake-nbd-test.ps1 `
+              -TestExecutable libwnbd_tests.exe `
+              -Scenario $scenario.Name `
+              -GTestFilter TestNbdHandshakeFailures.NegotiationFailureReturnsError `
+              -Port $scenario.Port `
+              -OutputDir ci-artifacts
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
       - name: "Run fake NBD disconnect/error race tests"
         run: |
           $scenarios = @(
