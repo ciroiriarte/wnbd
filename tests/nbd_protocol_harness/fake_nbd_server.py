@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Ciro Iriarte
+#
+# Licensed under LGPL-2.1 (see LICENSE)
+
 """Minimal NBD protocol assertion server for WNBD tests.
 
 This is intentionally not a full NBD implementation.  It accepts one client,

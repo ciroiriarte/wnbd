@@ -1,0 +1,19 @@
+WNBD -- community fork
+======================
+
+This repository (github.com/ciroiriarte/wnbd) is an independent community fork
+of cloudbase/wnbd, diverging from upstream at v0.7.0. It is not affiliated with
+or endorsed by Cloudbase Solutions or SUSE.
+
+New files and all modifications introduced in this fork are:
+
+    Copyright (c) 2026 Ciro Iriarte
+
+Portions of this software originate from upstream and remain the copyright of
+their respective authors:
+
+    Copyright (c) 2019 SUSE LLC
+    Copyright (c) 2022-2023 Cloudbase Solutions
+
+All of the above is licensed under the GNU Lesser General Public License,
+version 2.1; see the LICENSE file for the full terms.

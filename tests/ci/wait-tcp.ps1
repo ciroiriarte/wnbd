@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Ciro Iriarte
+#
+# Licensed under LGPL-2.1 (see LICENSE)
+
 Param(
     [Parameter(Mandatory=$true)] [string] $HostName,
     [Parameter(Mandatory=$true)] [int] $Port,

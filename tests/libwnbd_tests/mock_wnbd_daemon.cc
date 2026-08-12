@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2022 Cloudbase Solutions
+ * Copyright (c) 2026 Ciro Iriarte
  *
  * Licensed under LGPL-2.1 (see LICENSE)
  */
