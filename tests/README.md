@@ -68,7 +68,11 @@ Add driver-backed tests for:
 Implemented deterministic structural checks:
 
 - read response `DataBufferSize` equals actual request length and oversized
-  reads are rejected before submitting the WNBD response.
+  reads are rejected before submitting the WNBD response;
+- userspace NBD writes send header and payload without staging an extra
+  full-payload copy;
+- the userspace NBD pending-request table is reserved up front and unit-tested
+  against rehashing within the expected reserve.
 
 ## Performance regression roadmap
 

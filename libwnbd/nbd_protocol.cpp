@@ -366,6 +366,18 @@ DWORD NbdGetReadResponseBufferSize(
     return 0;
 }
 
+size_t NbdGetDefaultPendingRequestsReserve()
+{
+    return 1024;
+}
+
+ULONG NbdGetWritePayloadStagingCopySize(
+    _In_ ULONG Length)
+{
+    UNREFERENCED_PARAMETER(Length);
+    return 0;
+}
+
 DWORD NbdSendOptExportName(
     _In_ SOCKET Fd,
     _In_ PUINT64 Size,
@@ -588,8 +600,6 @@ DWORD NbdSendWrite(
     UINT64 Offset,
     ULONG Length,
     PVOID Data,
-    PVOID *PreallocatedBuffer,
-    PULONG PreallocatedLength,
     UINT64 Handle,
     UINT32 NbdTransmissionFlags)
 {
@@ -611,29 +621,10 @@ DWORD NbdSendWrite(
         Handle,
         (NbdRequestType) (NBD_CMD_WRITE | NbdTransmissionFlags));
 
-    UINT Needed = Length + sizeof(NBD_REQUEST);
-    if (*PreallocatedLength < Needed) {
-        PCHAR Buf = (PCHAR) calloc(1, Needed);
-        if (!Buf) {
-            LogError("Insufficient resources. "
-                     "Failed to allocate: %ud bytes", Needed);
-            return ERROR_NOT_ENOUGH_MEMORY;
-        }
-        free(*PreallocatedBuffer);
-        *PreallocatedLength = Needed;
-        *PreallocatedBuffer = Buf;
+    DWORD Retval = SendExact(Fd, &Request, sizeof(Request));
+    if (!Retval && Length) {
+        Retval = SendExact(Fd, Data, Length);
     }
-
-#pragma warning(disable:6386)
-    CopyMemory(*PreallocatedBuffer, &Request,
-               sizeof(NBD_REQUEST));
-#pragma warning(default:6386)
-    CopyMemory(((PCHAR)*PreallocatedBuffer + sizeof(NBD_REQUEST)),
-               Data, Length);
-
-    DWORD Retval = SendExact(
-        Fd, *PreallocatedBuffer,
-        sizeof(NBD_REQUEST) + Length);
     if (Retval) {
         LogError("Couldn't submit NBD_CMD_WRITE.");
     }

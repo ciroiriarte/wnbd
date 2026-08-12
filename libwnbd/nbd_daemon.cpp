@@ -15,6 +15,7 @@ DWORD NbdGetReadResponseBufferSize(
     _In_ UINT32 RequestLength,
     _In_ UINT32 PreallocatedBufferSize,
     _Out_ PUINT32 DataBufferSize);
+size_t NbdGetDefaultPendingRequestsReserve();
 
 DWORD SetTcpFlags(SOCKET Fd)
 {
@@ -155,15 +156,8 @@ DWORD NbdDaemon::TryStart()
         return ERROR_INVALID_PARAMETER;
     }
 
-    // We're preallocating buffers for NBD write requests, enough to fit the
-    // maxium transfer length plus the NBD request header.
-    PreallocatedWBuffSz = WNBD_DEFAULT_MAX_TRANSFER_LENGTH +
-                          sizeof(NBD_REQUEST);
-    PreallocatedWBuff = (PVOID) calloc(1, PreallocatedWBuffSz);
-    if (!PreallocatedWBuff) {
-        LogError("Could not allocate %d bytes.", PreallocatedWBuffSz);
-        return ERROR_NOT_ENOUGH_MEMORY;
-    }
+    PendingRequests.reserve(NbdGetDefaultPendingRequestsReserve());
+
     PreallocatedRBuffSz = WNBD_DEFAULT_MAX_TRANSFER_LENGTH;
     PreallocatedRBuff = (PVOID) calloc(1, PreallocatedRBuffSz);
     if (!PreallocatedRBuff) {
@@ -381,8 +375,6 @@ void NbdDaemon::Write(
         BlockAddress * Handler->WnbdProps.BlockSize,
         BlockCount * Handler->WnbdProps.BlockSize,
         Buffer,
-        &Handler->PreallocatedWBuff,
-        &Handler->PreallocatedWBuffSz,
         RequestHandle,
         NbdTransmissionFlags);
     if (Err) {

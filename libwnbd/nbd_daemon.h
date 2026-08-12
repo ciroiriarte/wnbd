@@ -39,8 +39,6 @@ private:
     bool TerminateInProgress = false;
     PWNBD_DISK WnbdDisk = nullptr;
 
-    void* PreallocatedWBuff = nullptr;
-    ULONG PreallocatedWBuffSz = 0;
     void* PreallocatedRBuff = nullptr;
     ULONG PreallocatedRBuffSz = 0;
 
@@ -71,9 +69,6 @@ public:
 
         if (PreallocatedRBuff) {
             free(PreallocatedRBuff);
-        }
-        if (PreallocatedWBuff) {
-            free(PreallocatedWBuff);
         }
 
         if (WnbdDisk) {

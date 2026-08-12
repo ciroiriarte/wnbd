@@ -123,8 +123,6 @@ DWORD NbdSendWrite(
     _In_ UINT64 Offset,
     _In_ ULONG Length,
     _In_ PVOID Data,
-    _In_ PVOID *PreallocatedBuffer,
-    _In_ PULONG PreallocatedLength,
     _In_ UINT64 Handle,
     _In_ UINT32 NbdTransmissionFlags);
 

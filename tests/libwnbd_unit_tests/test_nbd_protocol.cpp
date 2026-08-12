@@ -3,6 +3,7 @@
 #include "nbd_protocol.h"
 
 #include <array>
+#include <unordered_map>
 
 typedef DWORD (*NbdRecvExactFn)(
     _In_ SOCKET Fd,
@@ -42,6 +43,11 @@ DWORD NbdGetReadResponseBufferSize(
     _In_ UINT32 RequestLength,
     _In_ UINT32 PreallocatedBufferSize,
     _Out_ PUINT32 DataBufferSize);
+
+size_t NbdGetDefaultPendingRequestsReserve();
+
+ULONG NbdGetWritePayloadStagingCopySize(
+    _In_ ULONG Length);
 
 void NbdEncodeRequest(
     _Out_ PNBD_REQUEST Request,
@@ -354,4 +360,28 @@ TEST(TestNbdProtocolPerformance, ReadResponseRejectsOversizedRequest)
     EXPECT_EQ(0xaaaaaaaaUL, DataBufferSize);
     EXPECT_EQ(ERROR_INVALID_PARAMETER,
               NbdGetReadResponseBufferSize(1, 1, nullptr));
+}
+
+TEST(TestNbdProtocolPerformance, WritePathDoesNotStagePayloadCopy)
+{
+    EXPECT_EQ(0UL, NbdGetWritePayloadStagingCopySize(0));
+    EXPECT_EQ(0UL, NbdGetWritePayloadStagingCopySize(4096));
+    EXPECT_EQ(0UL,
+              NbdGetWritePayloadStagingCopySize(2 * 1024 * 1024));
+}
+
+TEST(TestNbdProtocolPerformance, PendingRequestReserveAvoidsExpectedRehash)
+{
+    const size_t Reserve = NbdGetDefaultPendingRequestsReserve();
+    ASSERT_GE(Reserve, 1024ULL);
+
+    std::unordered_map<UINT64, UINT32> PendingRequests;
+    PendingRequests.reserve(Reserve);
+    const size_t BucketCount = PendingRequests.bucket_count();
+
+    for (size_t Index = 0; Index < Reserve; ++Index) {
+        PendingRequests.emplace((UINT64) Index, (UINT32) Index);
+        ASSERT_EQ(BucketCount, PendingRequests.bucket_count())
+            << "rehash at insert " << Index;
+    }
 }
