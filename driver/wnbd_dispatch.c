@@ -66,12 +66,32 @@ NTSTATUS LockUsermodeBuffer(
     return Status;
 }
 
+// Locks a portion of the fetch data buffer on demand. On failure, any
+// partially-initialized MDL is cleaned up so the caller can safely retry or
+// exit with Mdl left NULL.
+static NTSTATUS LockFetchBuffer(
+    PVOID Buffer, UINT32 BufferSize,
+    PVOID* OutBuffer, PMDL* OutMdl, BOOLEAN* OutLocked)
+{
+    NTSTATUS Status = LockUsermodeBuffer(
+        Buffer, BufferSize, TRUE, OutBuffer, OutMdl, OutLocked);
+    if (Status && *OutMdl) {
+        if (*OutLocked) {
+            MmUnlockPages(*OutMdl);
+        }
+        IoFreeMdl(*OutMdl);
+        *OutMdl = NULL;
+        *OutLocked = FALSE;
+    }
+    return Status;
+}
+
 NTSTATUS WnbdDispatchRequest(
     PIRP Irp,
     PWNBD_DISK_DEVICE Device,
     PWNBD_IOCTL_FETCH_REQ_COMMAND Command)
 {
-    PVOID Buffer;
+    PVOID Buffer = NULL;
     NTSTATUS Status = 0;
     PWNBD_IO_REQUEST Request = &Command->Request;
     PMDL Mdl = NULL;
@@ -87,11 +107,10 @@ NTSTATUS WnbdDispatchRequest(
         return STATUS_ACCESS_DENIED;
     }
 
-    Status = LockUsermodeBuffer(
-        Command->DataBuffer, Command->DataBufferSize, TRUE,
-        &Buffer, &Mdl, &BufferLocked);
-    if (Status)
-        goto Exit;
+    // The fetch payload buffer is locked lazily, and only for the transfer
+    // that actually needs it: WRITE/PR-out copy their payload into it and
+    // UNMAP writes a single descriptor. READ/FLUSH/PR-in never touch it during
+    // the fetch, and no buffer is mapped while the loop waits for work.
 
     static UINT64 RequestHandle = 0;
 
@@ -192,6 +211,16 @@ NTSTATUS WnbdDispatchRequest(
                 goto Exit;
             }
 
+            Status = LockFetchBuffer(
+                Command->DataBuffer, sizeof(WNBD_UNMAP_DESCRIPTOR),
+                &Buffer, &Mdl, &BufferLocked);
+            if (Status) {
+                SrbSetSrbStatus(Element->Srb, SRB_STATUS_INTERNAL_ERROR);
+                CompleteRequest(Device, Element, TRUE);
+                InterlockedDecrement64(&Device->Stats.UnsubmittedIORequests);
+                continue;
+            }
+
             PWNBD_UNMAP_DESCRIPTOR UnmapDescriptor = (
                 PWNBD_UNMAP_DESCRIPTOR) Buffer;
             RtlZeroMemory(UnmapDescriptor, sizeof(WNBD_UNMAP_DESCRIPTOR));
@@ -232,19 +261,33 @@ NTSTATUS WnbdDispatchRequest(
                 goto Exit;
             }
 
-            PVOID SrbBuffer;
-            ULONG StorResult = StorPortGetSystemAddress(
-                Element->DeviceExtension, Element->Srb, &SrbBuffer);
-            if (StorResult) {
-                SrbSetSrbStatus(Element->Srb, SRB_STATUS_INTERNAL_ERROR);
-                CompleteRequest(Device, Element, TRUE);
-                InterlockedDecrement64(&Device->Stats.UnsubmittedIORequests);
-                WNBD_LOG_WARN("Could not get SRB %p 0x%llx data buffer. Error: %lu.",
-                              Element->Srb, Element->Tag, StorResult);
-                continue;
-            }
+            if (Element->DataLength > 0) {
+                // Lock only the bytes we're about to copy, rather than the
+                // whole fetch buffer.
+                Status = LockFetchBuffer(
+                    Command->DataBuffer, Element->DataLength,
+                    &Buffer, &Mdl, &BufferLocked);
+                if (Status) {
+                    SrbSetSrbStatus(Element->Srb, SRB_STATUS_INTERNAL_ERROR);
+                    CompleteRequest(Device, Element, TRUE);
+                    InterlockedDecrement64(&Device->Stats.UnsubmittedIORequests);
+                    continue;
+                }
 
-            RtlCopyMemory(Buffer, SrbBuffer, Element->DataLength);
+                PVOID SrbBuffer;
+                ULONG StorResult = StorPortGetSystemAddress(
+                    Element->DeviceExtension, Element->Srb, &SrbBuffer);
+                if (StorResult) {
+                    SrbSetSrbStatus(Element->Srb, SRB_STATUS_INTERNAL_ERROR);
+                    CompleteRequest(Device, Element, TRUE);
+                    InterlockedDecrement64(&Device->Stats.UnsubmittedIORequests);
+                    WNBD_LOG_WARN("Could not get SRB %p 0x%llx data buffer. Error: %lu.",
+                                  Element->Srb, Element->Tag, StorResult);
+                    continue;
+                }
+
+                RtlCopyMemory(Buffer, SrbBuffer, Element->DataLength);
+            }
             break;
         }
 
