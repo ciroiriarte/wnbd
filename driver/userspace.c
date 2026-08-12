@@ -121,6 +121,7 @@ WnbdDeviceMonitorThread(_In_ PVOID Context)
     KeEnterCriticalRegion();
     KeAcquireSpinLock(&DeviceExtension->DeviceListLock, &Irql);
     RemoveEntryList(&Device->ListEntry);
+    RemoveEntryList(&Device->ConnIdHashLink);
     RtlClearBits(&ScsiBitMapHeader,
                  Device->Lun +
                  Device->Target * WNBD_MAX_LUNS_PER_TARGET +
@@ -296,9 +297,13 @@ WnbdCreateConnection(PWNBD_EXTENSION DeviceExtension,
     ConnectionInfo->Lun = Device->Lun;
     ConnectionInfo->ConnectionId = Device->ConnectionId;
 
-    ExInterlockedInsertTailList(
-        &DeviceExtension->DeviceList, &Device->ListEntry,
-        &DeviceExtension->DeviceListLock);
+    KIRQL ListIrql = { 0 };
+    KeAcquireSpinLock(&DeviceExtension->DeviceListLock, &ListIrql);
+    InsertTailList(&DeviceExtension->DeviceList, &Device->ListEntry);
+    InsertHeadList(
+        &DeviceExtension->ConnIdHashBuckets[WNBD_CONN_ID_BUCKET(Device->ConnectionId)],
+        &Device->ConnIdHashLink);
+    KeReleaseSpinLock(&DeviceExtension->DeviceListLock, ListIrql);
 
     InterlockedIncrement(&DeviceExtension->DeviceCount);
     StorPortNotification(BusChangeDetected, DeviceExtension, Device->Bus);

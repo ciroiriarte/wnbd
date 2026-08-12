@@ -154,8 +154,11 @@ WnbdHwFindAdapter(PVOID DeviceExtension,
     /*
      * Initialize basic fields of the device global extension
      */
-    InitializeListHead(&Ext->DeviceList);       
+    InitializeListHead(&Ext->DeviceList);
     KeInitializeSpinLock(&Ext->DeviceListLock);
+    for (ULONG Index = 0; Index < WNBD_CONN_ID_HASH_BUCKETS; Index++) {
+        InitializeListHead(&Ext->ConnIdHashBuckets[Index]);
+    }
     KeInitializeEvent(&Ext->GlobalDeviceRemovalEvent, SynchronizationEvent, FALSE);
     ExInitializeRundownProtection(&Ext->RundownProtection);
     GlobalExt = Ext;
