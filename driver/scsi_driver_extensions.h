@@ -15,10 +15,18 @@
 #define WNBD_SUBMITTED_REQ_HASH_BUCKETS 256
 #define WNBD_SUBMITTED_REQ_HASH_MASK (WNBD_SUBMITTED_REQ_HASH_BUCKETS - 1)
 
+// Hash index of devices by connection id, avoiding a full device-list scan on
+// hot IOCTL lookups. Bucket count must be a power of two.
+#define WNBD_CONN_ID_HASH_BUCKETS 64
+#define WNBD_CONN_ID_HASH_MASK (WNBD_CONN_ID_HASH_BUCKETS - 1)
+#define WNBD_CONN_ID_BUCKET(ConnId) ((ULONG)((ConnId) & WNBD_CONN_ID_HASH_MASK))
+
 typedef struct _WNBD_EXTENSION {
     UNICODE_STRING                    DeviceInterface;
     LIST_ENTRY                        DeviceList;
     KSPIN_LOCK                        DeviceListLock;
+    // Connection-id-keyed index into DeviceList, guarded by DeviceListLock.
+    LIST_ENTRY                        ConnIdHashBuckets[WNBD_CONN_ID_HASH_BUCKETS];
     LONG                              DeviceCount;
     ERESOURCE                         DeviceCreationLock;
 
@@ -29,6 +37,8 @@ typedef struct _WNBD_EXTENSION {
 typedef struct _WNBD_DISK_DEVICE
 {
     LIST_ENTRY                  ListEntry;
+    // Links the device into a WNBD_EXTENSION ConnIdHashBuckets chain.
+    LIST_ENTRY                  ConnIdHashLink;
     PWNBD_EXTENSION             DeviceExtension;
 
     BOOLEAN                     Connected;

@@ -308,10 +308,12 @@ WnbdFindDeviceByConnId(
     KIRQL Irql = { 0 };
     KeAcquireSpinLock(&DeviceExtension->DeviceListLock, &Irql);
     PWNBD_DISK_DEVICE Device = NULL;
-    for (PLIST_ENTRY Entry = DeviceExtension->DeviceList.Flink;
-         Entry != &DeviceExtension->DeviceList; Entry = Entry->Flink)
+    PLIST_ENTRY Bucket =
+        &DeviceExtension->ConnIdHashBuckets[WNBD_CONN_ID_BUCKET(ConnectionId)];
+    for (PLIST_ENTRY Entry = Bucket->Flink; Entry != Bucket; Entry = Entry->Flink)
     {
-        Device = (PWNBD_DISK_DEVICE) CONTAINING_RECORD(Entry, WNBD_DISK_DEVICE, ListEntry);
+        Device = (PWNBD_DISK_DEVICE) CONTAINING_RECORD(
+            Entry, WNBD_DISK_DEVICE, ConnIdHashLink);
         if (Device->ConnectionId == ConnectionId) {
             if (Acquire && !WnbdAcquireDevice(Device))
                 Device = NULL;
