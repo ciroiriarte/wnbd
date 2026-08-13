@@ -198,12 +198,15 @@ jobs:
           --nbd-port 10809
       - name: "Run WNBD concurrency soak test"
         # Sustained multi-threaded overlapping I/O exercises the hot-path
-        # concurrency changes (completion hash + SendLock). Time-bounded here
-        # for the PR gate; a nightly build can raise WNBD_SOAK_SECONDS/THREADS.
+        # concurrency changes. WNBD_DISPATCHER_THREADS>1 makes the daemon issue
+        # genuinely concurrent outbound sends, which is what actually exercises
+        # SendLock (with a single dispatcher, sends never overlap). Time-bounded
+        # here for the PR gate; a nightly build can raise the knobs.
         timeout-minutes: 6
         env:
           WNBD_SOAK_SECONDS: 25
           WNBD_SOAK_THREADS: 32
+          WNBD_DISPATCHER_THREADS: 4
         run: >
           libwnbd_tests.exe
           --gtest_filter=TestNbdSoak.*

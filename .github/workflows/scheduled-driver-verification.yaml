@@ -204,10 +204,14 @@ jobs:
           -OutputDir ci-artifacts
           -TimeoutSeconds 30
       - name: "Assert the soak test FAILS without SendLock"
+        # WNBD_DISPATCHER_THREADS>1 is essential here: SendLock only matters when
+        # multiple dispatcher threads send concurrently. With it disabled, their
+        # frames interleave on the socket and the soak must detect corruption.
         timeout-minutes: 8
         env:
           WNBD_SOAK_SECONDS: 15
           WNBD_SOAK_THREADS: 32
+          WNBD_DISPATCHER_THREADS: 4
         run: |
           libwnbd_tests.exe `
             --gtest_filter=TestNbdSoak.* `

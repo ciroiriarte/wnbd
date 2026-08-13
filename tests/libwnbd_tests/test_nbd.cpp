@@ -478,12 +478,16 @@ TEST(TestNbd, TestIO) {
 //     collisions require the monotonic tag counter to wrap 256 past a still
 //     outstanding request, which only happens under continuous churn -- hence
 //     a time-bounded soak rather than a single burst.
-//   - the userspace SendLock: the two dispatcher workers share one socket, so a
-//     missing lock interleaves NBD header/payload bytes on the wire, which
-//     surfaces as I/O/protocol errors or corrupted block contents.
+//   - the userspace SendLock: it only matters when multiple dispatcher threads
+//     send concurrently on the shared socket. The daemon uses one dispatcher by
+//     default, so SendLock is exercised only when the mapping is created with
+//     WNBD_DISPATCHER_THREADS>1; then a missing lock interleaves NBD
+//     header/payload bytes on the wire, surfacing as I/O errors or corrupted
+//     block contents. (Proven by the sendlock-negative-control CI job.)
 //
 // Excluded from the default functional run and driven as a dedicated,
-// time-bounded CI step. Tunable via env: WNBD_SOAK_SECONDS, WNBD_SOAK_THREADS.
+// time-bounded CI step. Tunable via env: WNBD_SOAK_SECONDS, WNBD_SOAK_THREADS,
+// WNBD_DISPATCHER_THREADS.
 // Unbuffered, write-through I/O is used so each request reaches the driver
 // instead of being served from the Windows cache.
 

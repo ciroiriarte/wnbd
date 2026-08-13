@@ -5,6 +5,8 @@
  * Licensed under LGPL-2.1 (see LICENSE)
  */
 
+#include <cstdlib>
+
 #include "nbd_daemon.h"
 #include "nbd_protocol.h"
 #include "utils.h"
@@ -260,9 +262,26 @@ DWORD NbdDaemon::TryStart()
         return Err;
     }
 
-    // We currently use a single NBD connection, which is why
-    // we'll stick with a single WNBD worker thread.
-    Err = WnbdStartDispatcher(WnbdDisk, 1);
+    // A single NBD connection is used, so a single WNBD dispatcher thread is
+    // the production default. Tests raise this via WNBD_DISPATCHER_THREADS to
+    // drive genuinely concurrent outbound sends -- the scenario SendLock guards
+    // (it serializes each frame's header+payload across dispatcher threads).
+    DWORD DispatcherThreads = 1;
+    {
+        char EnvBuf[16] = { 0 };
+        size_t EnvLen = 0;
+        if (!getenv_s(&EnvLen, EnvBuf, sizeof(EnvBuf),
+                      "WNBD_DISPATCHER_THREADS") && EnvLen > 0) {
+            DWORD Parsed = (DWORD) strtoul(EnvBuf, nullptr, 10);
+            if (Parsed >= WNBD_MIN_DISPATCHER_THREAD_COUNT &&
+                    Parsed <= WNBD_MAX_DISPATCHER_THREAD_COUNT) {
+                DispatcherThreads = Parsed;
+                LogInfo("Using %u NBD dispatcher thread(s) "
+                        "(WNBD_DISPATCHER_THREADS).", DispatcherThreads);
+            }
+        }
+    }
+    Err = WnbdStartDispatcher(WnbdDisk, DispatcherThreads);
     if (Err) {
         return Err;
     }
