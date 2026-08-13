@@ -284,6 +284,15 @@ NTSTATUS WnbdDispatchRequest(
                     InterlockedDecrement64(&Device->Stats.UnsubmittedIORequests);
                     WNBD_LOG_WARN("Could not get SRB %p 0x%llx data buffer. Error: %lu.",
                                   Element->Srb, Element->Tag, StorResult);
+                    // The fetch buffer was locked just above; release it before
+                    // looping, otherwise the next LockFetchBuffer overwrites Mdl
+                    // and leaks this MDL along with its locked user pages.
+                    if (BufferLocked) {
+                        MmUnlockPages(Mdl);
+                    }
+                    IoFreeMdl(Mdl);
+                    Mdl = NULL;
+                    BufferLocked = FALSE;
                     continue;
                 }
 
