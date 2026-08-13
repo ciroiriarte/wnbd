@@ -162,20 +162,15 @@ jobs:
         run: qemu-img create -f qcow2 test_5tb.qcow2 5T
       # cache.direct=on doesn't work with qcow2 images. Sparse files may not
       # be properly handled on Windows, so we'll avoid raw images for now.
-      - name: "Start qemu-storage-daemon NBD server"
-        run: |
-          New-Item -ItemType Directory -Force -Path ci-artifacts | Out-Null
-          $stdout = (Resolve-Path ci-artifacts).Path + "\qemu-storage-daemon.out.log"
-          $stderr = (Resolve-Path ci-artifacts).Path + "\qemu-storage-daemon.err.log"
-          $args = "--blockdev driver=file,node-name=file,filename=test_5tb.qcow2 " +
-                  "--blockdev driver=qcow2,node-name=qcow2,file=file " +
-                  "--nbd-server addr.type=inet,addr.host=127.0.0.1,addr.port=10809 " +
-                  "--export type=nbd,id=export,node-name=qcow2,name=test_5tb,writable=on"
-          Start-Process qemu-storage-daemon -ArgumentList $args -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru |
-            Select-Object -Property Id,ProcessName,StartTime |
-            Format-List
-      - name: "Wait for the NBD server to start"
-        run: powershell -ExecutionPolicy Bypass -File tests\ci\wait-tcp.ps1 -HostName 127.0.0.1 -Port 10809 -TimeoutSeconds 20
+      - name: "Start qemu-storage-daemon NBD server and wait until ready"
+        run: >
+          powershell -ExecutionPolicy Bypass -File tests\ci\start-qemu-nbd.ps1
+          -ImagePath test_5tb.qcow2
+          -HostName 127.0.0.1
+          -Port 10809
+          -ExportName test_5tb
+          -OutputDir ci-artifacts
+          -TimeoutSeconds 30
       - name: "Run WNBD functional tests"
         run: >
           libwnbd_tests.exe
