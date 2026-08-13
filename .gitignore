@@ -48,3 +48,6 @@ tags
 /tests/libwnbd_tests/x64
 
 include/version.h
+
+# oh-my-claudecode operational state (runtime artifacts, not source)
+/.omc/
