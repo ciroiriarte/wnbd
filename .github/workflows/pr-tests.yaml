@@ -155,7 +155,17 @@ jobs:
             if ($LASTEXITCODE) { exit $LASTEXITCODE }
           }
       - name: "Install qemu, used for NBD tests"
-        run: choco install qemu --version 2023.4.24 -y
+        # community.chocolatey.org intermittently returns 504s; retry so a
+        # transient feed error does not fail the whole job.
+        run: |
+          $attempts = 3
+          for ($i = 1; $i -le $attempts; $i++) {
+            choco install qemu --version 2023.4.24 -y --no-progress
+            if ($LASTEXITCODE -eq 0) { break }
+            Write-Host "choco install qemu failed (attempt $i/$attempts, exit code $LASTEXITCODE)."
+            if ($i -eq $attempts) { throw "Failed to install qemu after $attempts attempt(s)." }
+            Start-Sleep -Seconds 15
+          }
       - name: "Add qemu directory to env PATH"
         run: Add-Content $env:GITHUB_PATH 'C:\Program Files\qemu'
       - name: "Create qcow2 image, used for NBD"
