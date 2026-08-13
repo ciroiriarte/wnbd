@@ -186,12 +186,28 @@ jobs:
         # against the fake NBD server, which injects the malformed handshake /
         # read failure / stall they assert on. Against the real qemu server the
         # handshake succeeds, so WnbdRunNbdDaemon blocks serving the disk and the
-        # test hangs; exclude those suites here.
+        # test hangs; exclude those suites here. TestNbdSoak.* is a long,
+        # multi-threaded soak driven as its own step below.
         timeout-minutes: 5
         run: >
           libwnbd_tests.exe
-          --gtest_filter=-TestNbdHandshakeFailures.*:TestNbdFailures.*
+          --gtest_filter=-TestNbdHandshakeFailures.*:TestNbdFailures.*:TestNbdSoak.*
           --gtest_output=xml:ci-artifacts\libwnbd-tests-${{ matrix.configuration }}.xml
+          --nbd-export-name test_5tb
+          --nbd-hostname 127.0.0.1
+          --nbd-port 10809
+      - name: "Run WNBD concurrency soak test"
+        # Sustained multi-threaded overlapping I/O exercises the hot-path
+        # concurrency changes (completion hash + SendLock). Time-bounded here
+        # for the PR gate; a nightly build can raise WNBD_SOAK_SECONDS/THREADS.
+        timeout-minutes: 6
+        env:
+          WNBD_SOAK_SECONDS: 25
+          WNBD_SOAK_THREADS: 32
+        run: >
+          libwnbd_tests.exe
+          --gtest_filter=TestNbdSoak.*
+          --gtest_output=xml:ci-artifacts\libwnbd-soak-${{ matrix.configuration }}.xml
           --nbd-export-name test_5tb
           --nbd-hostname 127.0.0.1
           --nbd-port 10809
