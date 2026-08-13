@@ -1,0 +1,139 @@
+name: Self-hosted driver verifier
+
+# Runs the concurrency soak under FULL Driver Verifier (Special Pool + Force
+# IRQL + Pool Tracking + I/O verification + deadlock detection) on a self-hosted
+# Windows runner. Those flags require a reboot to take effect, which hosted
+# runners cannot do; a dedicated VM is prepared ONCE with
+# tests/ci/enable-driver-verifier.ps1 + reboot, so verification is already
+# active from boot and no per-job reboot is needed.
+#
+# Runner requirements:
+#   - Windows, self-hosted, labeled 'wnbd-verifier'.
+#   - Runner service running elevated (Driver Verifier + driver install need it).
+#   - Driver Verifier enabled for wnbd.sys and the machine rebooted (see the
+#     enable script). The first job step fails fast if it is not active.
+#   - Visual Studio / MSBuild + WDK, qemu reachable (installed or on PATH).
+#
+# Manual-dispatch only; it never runs on GitHub-hosted CI.
+on:
+  workflow_dispatch:
+    inputs:
+      soak_seconds:
+        description: "Soak duration per test (seconds)"
+        default: "60"
+      soak_threads:
+        description: "Client I/O threads"
+        default: "32"
+      dispatcher_threads:
+        description: "NBD dispatcher threads (>1 exercises SendLock)"
+        default: "4"
+
+jobs:
+  verifier-soak:
+    runs-on: [self-hosted, windows, wnbd-verifier]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
+      - name: "Add toolkit bin dir to env PATH"
+        run: >
+          Add-Content $env:GITHUB_PATH
+          "C:\Program Files (x86)\Windows Kits\10\bin\x64"
+      - name: "Confirm Driver Verifier is active on wnbd.sys"
+        # Fail fast rather than report hollow verification. This confirms the
+        # one-time enable + reboot actually took, and that Special Pool is on.
+        run: |
+          New-Item -ItemType Directory -Force -Path ci-artifacts | Out-Null
+          $Query = verifier.exe /query
+          $Query | Tee-Object -FilePath ci-artifacts\verifier-active.txt
+          if ("$Query" -notmatch 'wnbd\.sys') {
+            throw "Driver Verifier is not active for wnbd.sys on this runner. Run tests\ci\enable-driver-verifier.ps1 and reboot the VM."
+          }
+          if ("$Query" -notmatch 'Special pool') {
+            throw "Driver Verifier is attached but Special Pool is not enabled; re-run the enable script with the strong flags and reboot."
+          }
+          Write-Host "Driver Verifier (Special Pool + Force IRQL) active for wnbd.sys."
+      - name: "Build WNBD Release"
+        run: >
+          msbuild vstudio\wnbd.sln
+          /property:Configuration=Release
+      - name: "Add WNBD build directory to env PATH"
+        run: >
+          Add-Content $env:GITHUB_PATH
+          (Resolve-Path vstudio\x64\Release).Path
+      - name: "Import WNBD certificate to root store"
+        run: >
+          Import-Certificate
+          -FilePath vstudio\x64\Release\wnbd.cer
+          -Cert Cert:\LocalMachine\Root
+      - name: "Import WNBD certificate to trusted publisher store"
+        run: >
+          Import-Certificate
+          -FilePath vstudio\x64\Release\wnbd.cer
+          -Cert Cert:\LocalMachine\TrustedPublisher
+      - name: "Import WNBD event definitions"
+        run: wevtutil im vstudio\wnbdevents.xml
+      - name: "Install the WNBD driver and create the virtual adapter"
+        timeout-minutes: 2
+        run: >
+          wnbd-client install-driver --debug
+          vstudio\x64\Release\driver\wnbd.inf
+      - name: "Install qemu, used for NBD tests"
+        run: |
+          $attempts = 3
+          for ($i = 1; $i -le $attempts; $i++) {
+            choco install qemu --version 2023.4.24 -y --no-progress
+            if ($LASTEXITCODE -eq 0) { break }
+            Write-Host "choco install qemu failed (attempt $i/$attempts, exit code $LASTEXITCODE)."
+            if ($i -eq $attempts) { throw "Failed to install qemu after $attempts attempt(s)." }
+            Start-Sleep -Seconds 15
+          }
+      - name: "Add qemu directory to env PATH"
+        run: Add-Content $env:GITHUB_PATH 'C:\Program Files\qemu'
+      - name: "Create qcow2 image, used for NBD"
+        run: qemu-img create -f qcow2 test_5tb.qcow2 5T
+      - name: "Start qemu-storage-daemon NBD server and wait until ready"
+        run: >
+          powershell -ExecutionPolicy Bypass -File tests\ci\start-qemu-nbd.ps1
+          -ImagePath test_5tb.qcow2
+          -HostName 127.0.0.1
+          -Port 10809
+          -ExportName test_5tb
+          -OutputDir ci-artifacts
+          -TimeoutSeconds 30
+      - name: "Run concurrency soak under full Driver Verifier"
+        # The soak must pass; any Special Pool / Force IRQL / deadlock violation
+        # bugchecks the machine and fails the run.
+        timeout-minutes: 20
+        env:
+          WNBD_SOAK_SECONDS: ${{ inputs.soak_seconds }}
+          WNBD_SOAK_THREADS: ${{ inputs.soak_threads }}
+          WNBD_DISPATCHER_THREADS: ${{ inputs.dispatcher_threads }}
+        run: >
+          libwnbd_tests.exe
+          --gtest_filter=TestNbdSoak.*
+          --gtest_output=xml:ci-artifacts\self-hosted-verifier-soak.xml
+          --nbd-export-name test_5tb
+          --nbd-hostname 127.0.0.1
+          --nbd-port 10809
+      - name: "Collect diagnostics"
+        if: always()
+        run: powershell -ExecutionPolicy Bypass -File tests\ci\collect-diagnostics.ps1 -OutputDir ci-artifacts
+      - name: "Stop qemu"
+        if: always()
+        run: powershell -ExecutionPolicy Bypass -File tests\ci\stop-qemu.ps1
+      - name: "Uninstall the WNBD driver"
+        # Unload triggers Driver Verifier's pool-leak check for wnbd.sys.
+        if: always()
+        run: wnbd-client uninstall-driver
+      - name: "Upload diagnostics"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wnbd-self-hosted-verifier
+          path: ci-artifacts
+          if-no-files-found: ignore
