@@ -129,15 +129,15 @@ jobs:
           "Diagnostics artifact: wnbd-scheduled-driver-verifier-smoke" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
 
 
-  # Runs the concurrency soak under Driver Verifier with Special Pool + Force
-  # IRQL + Pool Tracking + I/O verification + deadlock detection (0x3B), which
-  # catches the out-of-bounds / use-after-free / IRQL / lock-ordering bugs the
-  # hot-path concurrency changes could introduce. Verifier is configured BEFORE
-  # the driver is installed so the flags attach as wnbd.sys loads (no reboot),
-  # and attachment is confirmed to avoid hollow verification. No failure
-  # injection here, so the soak must still pass; a verifier violation bugchecks
-  # the runner (job fails). Low-resource injection needs a fault-tolerant
-  # workload and is tracked separately.
+  # Runs the concurrency soak under Driver Verifier. Only rebootless VOLATILE
+  # checks are usable on hosted runners: Special Pool, Force IRQL, and Low
+  # Resources require a system reboot to take effect (confirmed: verifier
+  # reports "reboot required / no drivers are currently verified"), which a
+  # hosted runner cannot do mid-job. So this enables volatile Pool Tracking on
+  # wnbd.sys and drives the multi-dispatcher soak through it (catching mismatched
+  # frees on the concurrency paths), and confirms attachment to avoid hollow
+  # verification. Full Special Pool + Force IRQL verification needs a self-hosted
+  # runner that can reboot; tracked separately.
   driver-verifier-soak:
     if: >
       github.event_name != 'workflow_dispatch' ||
@@ -175,29 +175,26 @@ jobs:
           -Cert Cert:\LocalMachine\TrustedPublisher
       - name: "Import WNBD event definitions"
         run: wevtutil im vstudio\wnbdevents.xml
-      - name: "Configure Driver Verifier for wnbd.sys before load"
-        # Persistent flags applied before the driver is installed, so wnbd.sys
-        # loads under full verification without a reboot (it is not boot-loaded).
-        run: |
-          New-Item -ItemType Directory -Force -Path ci-artifacts | Out-Null
-          verifier.exe /flags 0x3B /driver wnbd.sys
-          verifier.exe /query | Tee-Object -FilePath ci-artifacts\verifier-configured.txt
       - name: "Install the WNBD driver and create the virtual adapter"
         timeout-minutes: 1
         run: >
           wnbd-client install-driver --debug
           vstudio\x64\Release\driver\wnbd.inf
-      - name: "Confirm Driver Verifier is attached to wnbd.sys"
-        # Fail loudly rather than report hollow verification if the flags did
-        # not actually attach to the loaded driver.
+      - name: "Enable volatile Driver Verifier on wnbd.sys"
+        # Volatile flags take effect immediately (no reboot). Pool Tracking is
+        # the meaningful rebootless check; Special Pool / Force IRQL are not
+        # available this way. Confirm wnbd.sys is actually being verified so we
+        # never report hollow verification.
         run: |
           New-Item -ItemType Directory -Force -Path ci-artifacts | Out-Null
+          verifier.exe /volatile /adddriver wnbd.sys
+          verifier.exe /volatile /flags 0x8
           $Query = verifier.exe /query
           $Query | Tee-Object -FilePath ci-artifacts\verifier-active.txt
           if ("$Query" -notmatch 'wnbd\.sys') {
-            throw "Driver Verifier is not verifying wnbd.sys; refusing to report hollow verification."
+            throw "Driver Verifier (volatile) is not verifying wnbd.sys; refusing to report hollow verification."
           }
-          Write-Host "Driver Verifier is attached to wnbd.sys."
+          Write-Host "Driver Verifier (volatile Pool Tracking) attached to wnbd.sys."
       - uses: actions/setup-python@v5
         with:
           python-version: '3.x'
@@ -225,9 +222,9 @@ jobs:
           -OutputDir ci-artifacts
           -TimeoutSeconds 30
       - name: "Run concurrency soak under Driver Verifier"
-        # Verifier overhead is high, so give it a long timeout. The soak must
-        # still pass; any OOB/UAF/IRQL/lock-ordering violation bugchecks the
-        # runner and fails the job.
+        # Verifier overhead adds latency, so give it a long timeout. The soak
+        # must pass; a Pool Tracking violation (mismatched/bad free) bugchecks
+        # the runner and fails the job.
         timeout-minutes: 15
         env:
           WNBD_SOAK_SECONDS: 30
@@ -260,7 +257,7 @@ jobs:
         if: always()
         run: |
           "## Driver Verifier soak" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
-          "Runs TestNbdSoak.* under Special Pool + Force IRQL + Pool Tracking + I/O verification + deadlock detection (flags 0x3B), with verifier attached to wnbd.sys before load." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "Runs TestNbdSoak.* under volatile Driver Verifier Pool Tracking on wnbd.sys (rebootless). Special Pool + Force IRQL require a reboot and a self-hosted runner." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
 
 
   # Negative control for the concurrency soak test: build libwnbd with the NBD
