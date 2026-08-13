@@ -182,8 +182,15 @@ jobs:
           -OutputDir ci-artifacts
           -TimeoutSeconds 30
       - name: "Run WNBD functional tests"
+        # TestNbdHandshakeFailures.* and TestNbdFailures.* are driven separately
+        # against the fake NBD server, which injects the malformed handshake /
+        # read failure / stall they assert on. Against the real qemu server the
+        # handshake succeeds, so WnbdRunNbdDaemon blocks serving the disk and the
+        # test hangs; exclude those suites here.
+        timeout-minutes: 5
         run: >
           libwnbd_tests.exe
+          --gtest_filter=-TestNbdHandshakeFailures.*:TestNbdFailures.*
           --gtest_output=xml:ci-artifacts\libwnbd-tests-${{ matrix.configuration }}.xml
           --nbd-export-name test_5tb
           --nbd-hostname 127.0.0.1
