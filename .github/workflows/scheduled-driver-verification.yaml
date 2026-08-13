@@ -224,6 +224,8 @@ jobs:
             throw "Negative control FAILED: the soak passed with SendLock disabled, so it does not actually detect missing frame serialization."
           }
           Write-Host "Negative control OK: soak failed as expected (exit $Code) with SendLock disabled."
+          # The soak's non-zero exit is the expected outcome here; report success.
+          exit 0
       - name: "Collect diagnostics"
         if: always()
         run: powershell -ExecutionPolicy Bypass -File tests\ci\collect-diagnostics.ps1 -OutputDir ci-artifacts
