@@ -115,3 +115,111 @@ jobs:
           "## Scheduled Driver Verifier smoke" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
           "Driver Verifier volatile smoke runs separately from the pull-request gate." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
           "Diagnostics artifact: wnbd-scheduled-driver-verifier-smoke" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+
+  # Negative control for the concurrency soak test: build libwnbd with the NBD
+  # SendLock compiled out and assert that TestNbdSoak.* now FAILS. This proves
+  # the soak actually detects missing outbound-frame serialization rather than
+  # passing vacuously. Kept out of the per-PR gate (expensive, and it must fail
+  # by construction); runs weekly and on demand.
+  sendlock-negative-control:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
+      - name: "Add toolkit bin dir to env PATH"
+        run: >
+          Add-Content $env:GITHUB_PATH
+          "C:\Program Files (x86)\Windows Kits\10\bin\x64"
+      - name: "Build WNBD Release with SendLock disabled"
+        # The CL env var prepends the define to every compilation, so libwnbd is
+        # built with the no-op SendLock. Only libwnbd/nbd_daemon.h reads it.
+        env:
+          CL: /DWNBD_TEST_DISABLE_SENDLOCK
+        run: >
+          msbuild vstudio\wnbd.sln
+          /property:Configuration=Release
+      - name: "Add WNBD build directory to env PATH"
+        run: >
+          Add-Content $env:GITHUB_PATH
+          (Resolve-Path vstudio\x64\Release).Path
+      - name: "Import WNBD certificate to root store"
+        run: >
+          Import-Certificate
+          -FilePath vstudio\x64\Release\wnbd.cer
+          -Cert Cert:\LocalMachine\Root
+      - name: "Import WNBD certificate to trusted publisher store"
+        run: >
+          Import-Certificate
+          -FilePath vstudio\x64\Release\wnbd.cer
+          -Cert Cert:\LocalMachine\TrustedPublisher
+      - name: "Import WNBD event definitions"
+        run: wevtutil im vstudio\wnbdevents.xml
+      - name: "Install the WNBD driver and create the virtual adapter"
+        timeout-minutes: 1
+        run: >
+          wnbd-client install-driver --debug
+          vstudio\x64\Release\driver\wnbd.inf
+      - name: "Install qemu, used for NBD tests"
+        run: |
+          $attempts = 3
+          for ($i = 1; $i -le $attempts; $i++) {
+            choco install qemu --version 2023.4.24 -y --no-progress
+            if ($LASTEXITCODE -eq 0) { break }
+            Write-Host "choco install qemu failed (attempt $i/$attempts, exit code $LASTEXITCODE)."
+            if ($i -eq $attempts) { throw "Failed to install qemu after $attempts attempt(s)." }
+            Start-Sleep -Seconds 15
+          }
+      - name: "Add qemu directory to env PATH"
+        run: Add-Content $env:GITHUB_PATH 'C:\Program Files\qemu'
+      - name: "Create qcow2 image, used for NBD"
+        run: qemu-img create -f qcow2 test_5tb.qcow2 5T
+      - name: "Start qemu-storage-daemon NBD server and wait until ready"
+        run: >
+          powershell -ExecutionPolicy Bypass -File tests\ci\start-qemu-nbd.ps1
+          -ImagePath test_5tb.qcow2
+          -HostName 127.0.0.1
+          -Port 10809
+          -ExportName test_5tb
+          -OutputDir ci-artifacts
+          -TimeoutSeconds 30
+      - name: "Assert the soak test FAILS without SendLock"
+        timeout-minutes: 8
+        env:
+          WNBD_SOAK_SECONDS: 15
+          WNBD_SOAK_THREADS: 32
+        run: |
+          libwnbd_tests.exe `
+            --gtest_filter=TestNbdSoak.* `
+            --gtest_output=xml:ci-artifacts\libwnbd-soak-negative.xml `
+            --nbd-export-name test_5tb `
+            --nbd-hostname 127.0.0.1 `
+            --nbd-port 10809
+          $Code = $LASTEXITCODE
+          if ($Code -eq 0) {
+            throw "Negative control FAILED: the soak passed with SendLock disabled, so it does not actually detect missing frame serialization."
+          }
+          Write-Host "Negative control OK: soak failed as expected (exit $Code) with SendLock disabled."
+      - name: "Collect diagnostics"
+        if: always()
+        run: powershell -ExecutionPolicy Bypass -File tests\ci\collect-diagnostics.ps1 -OutputDir ci-artifacts
+      - name: "Stop qemu"
+        if: always()
+        run: powershell -ExecutionPolicy Bypass -File tests\ci\stop-qemu.ps1
+      - name: "Upload diagnostics"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wnbd-sendlock-negative-control
+          path: ci-artifacts
+          if-no-files-found: ignore
+      - name: "Write workflow summary"
+        if: always()
+        run: |
+          "## SendLock negative control" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "Builds libwnbd with the NBD SendLock compiled out and asserts the concurrency soak (TestNbdSoak.*) fails, proving the soak detects missing outbound-frame serialization." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append

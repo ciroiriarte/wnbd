@@ -27,6 +27,24 @@ struct PendingRequestInfo
     UINT32 Length;
 };
 
+// Serializes outbound NBD frames so the dispatcher threads cannot interleave a
+// request's header and payload on the shared socket. Normally a real mutex.
+//
+// WNBD_TEST_DISABLE_SENDLOCK swaps in a no-op lockable so the concurrency soak
+// test (TestNbdSoak.*) can be run as a negative control that proves it detects
+// missing frame serialization. It MUST NEVER be defined in a shipping build.
+#ifdef WNBD_TEST_DISABLE_SENDLOCK
+#pragma message("WNBD_TEST_DISABLE_SENDLOCK set: NBD SendLock is a no-op (test builds only).")
+struct WnbdSendLock
+{
+    void lock() {}
+    void unlock() {}
+    bool try_lock() { return true; }
+};
+#else
+using WnbdSendLock = std::mutex;
+#endif
+
 class NbdDaemon
 {
 private:
@@ -36,7 +54,7 @@ private:
     bool NbdTransmissionStarted = false;
 
     std::mutex ShutdownLock;
-    std::mutex SendLock;
+    WnbdSendLock SendLock;
     bool Terminated = false;
     bool TerminateInProgress = false;
     PWNBD_DISK WnbdDisk = nullptr;
