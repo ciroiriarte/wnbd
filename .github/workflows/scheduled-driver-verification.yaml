@@ -1,11 +1,20 @@
 name: Scheduled driver verification
 on:
   workflow_dispatch:
+    inputs:
+      only:
+        description: "Which job to run on manual dispatch"
+        default: "all"
+        type: choice
+        options: [all, sdv, driver-verifier-smoke, sendlock-negative-control]
   schedule:
     - cron: '17 3 * * 1'
 
 jobs:
   sdv:
+    if: >
+      github.event_name != 'workflow_dispatch' ||
+      inputs.only == 'all' || inputs.only == 'sdv'
     runs-on: windows-2022
     timeout-minutes: 120
     steps:
@@ -56,6 +65,9 @@ jobs:
 
 
   driver-verifier-smoke:
+    if: >
+      github.event_name != 'workflow_dispatch' ||
+      inputs.only == 'all' || inputs.only == 'driver-verifier-smoke'
     runs-on: windows-2022
     timeout-minutes: 45
     steps:
@@ -123,6 +135,9 @@ jobs:
   # passing vacuously. Kept out of the per-PR gate (expensive, and it must fail
   # by construction); runs weekly and on demand.
   sendlock-negative-control:
+    if: >
+      github.event_name != 'workflow_dispatch' ||
+      inputs.only == 'all' || inputs.only == 'sendlock-negative-control'
     runs-on: windows-2022
     timeout-minutes: 30
     steps:
