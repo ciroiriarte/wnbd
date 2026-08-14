@@ -25,7 +25,16 @@
 // Number of SRB queue elements pre-allocated per device into a bounded free
 // list, sized to cover the default per-LUN queue depth. Requests beyond this
 // fall back to direct nonpaged pool allocation.
+//
+// WNBD_TEST_SMALL_SRB_POOL shrinks the pool so ordinary concurrent I/O exceeds
+// it, forcing the direct-alloc fallback, the exhaustion path, and both free
+// routes to run under test (e.g. Driver Verifier). Test builds only; never
+// define it in a shipping build.
+#ifdef WNBD_TEST_SMALL_SRB_POOL
+#define WNBD_SRB_POOL_SIZE 4
+#else
 #define WNBD_SRB_POOL_SIZE 256
+#endif
 
 typedef struct _WNBD_EXTENSION {
     UNICODE_STRING                    DeviceInterface;

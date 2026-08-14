@@ -890,3 +890,116 @@ TEST(TestNbdSoak, TeardownUnderLoad) {
 
     SUCCEED() << "teardown under concurrent I/O completed without hang or crash";
 }
+
+// Fault-tolerant I/O for running under Driver Verifier low-resource injection
+// (flag 0x4), ideally with a shrunk SRB pool (WNBD_TEST_SMALL_SRB_POOL). Unlike
+// the other soak tests it TOLERATES I/O failures (injected allocation failures
+// make requests fail by design) and asserts only the two things that must hold
+// regardless: (a) nothing bugchecks/crashes, and (b) any write that SUCCEEDS
+// reads back intact. That proves the driver's allocation-failure branches -- SRB
+// pool exhaustion + direct-alloc fallback + fallback failure, and the fetch
+// buffer / MDL failure path (StorPortGetSystemAddress) -- abort cleanly without
+// corrupting completed I/O. Without injection it is just an error-tolerant soak.
+TEST(TestNbdSoak, FaultTolerantIo) {
+    if (const char* SkipReason = GetMissingNbdParamReason()) {
+        WNBD_GTEST_SKIP(SkipReason);
+    }
+
+    WNBD_PROPERTIES WnbdProps = { 0 };
+    NbdMapping Mapping(&WnbdProps);
+
+    WNBD_CONNECTION_INFO ConnectionInfo = { 0 };
+    ASSERT_FALSE(WnbdShow(WnbdProps.InstanceName, &ConnectionInfo))
+        << "couldn't retrieve WNBD disk info";
+    UINT64 BlockCount = ConnectionInfo.Properties.BlockCount;
+    UINT32 BlockSize = ConnectionInfo.Properties.BlockSize;
+    ASSERT_LT(0ULL, BlockCount);
+    ASSERT_LT(0UL, BlockSize);
+    SetDiskWritable(string(WnbdProps.InstanceName));
+
+    const DWORD Threads = SoakEnvDword("WNBD_SOAK_THREADS", 16);
+    const DWORD Seconds = SoakEnvDword("WNBD_SOAK_SECONDS", 20);
+    const UINT64 RegionBlocks = 64;
+    UINT64 StrideBlocks = BlockCount / ((UINT64)Threads + 2);
+    ASSERT_GE(StrideBlocks, RegionBlocks) << "disk too small for the layout";
+
+    std::atomic<uint64_t> Corruptions{ 0 };
+    std::atomic<uint64_t> Succeeded{ 0 };
+    std::atomic<uint64_t> Tolerated{ 0 };
+    std::mutex FirstFailureLock;
+    string FirstFailure;
+    auto Deadline = std::chrono::steady_clock::now() +
+                    std::chrono::seconds(Seconds);
+
+    auto Worker = [&](DWORD WorkerId) {
+        HANDLE Handle = OpenSoakDisk(Mapping.GetInstanceName());
+        if (Handle == INVALID_HANDLE_VALUE) {
+            return;  // Under injection even opening can fail; tolerated.
+        }
+        unique_ptr<void, decltype(&CloseHandle)> HandleCloser(
+            Handle, &CloseHandle);
+        unique_ptr<void, decltype(&_aligned_free)> WriteBuf(
+            _aligned_malloc(BlockSize, BlockSize), &_aligned_free);
+        unique_ptr<void, decltype(&_aligned_free)> ReadBuf(
+            _aligned_malloc(BlockSize, BlockSize), &_aligned_free);
+        if (!WriteBuf.get() || !ReadBuf.get()) {
+            return;
+        }
+
+        UINT64 RegionBase = (UINT64)WorkerId * StrideBlocks;
+        uint64_t Seq = 0;
+        while (std::chrono::steady_clock::now() < Deadline) {
+            UINT64 Block = RegionBase + (Seq % RegionBlocks);
+            UINT64 ByteOffset = Block * BlockSize;
+            uint64_t Tag = ((uint64_t)WorkerId << 48) ^ (Block << 16) ^
+                           (Seq & 0xFFFF);
+            BYTE* Write = (BYTE*)WriteBuf.get();
+            for (UINT32 i = 0; i < BlockSize; i += sizeof(uint64_t)) {
+                uint64_t Value = Tag ^ (uint64_t)i;
+                memcpy(Write + i, &Value, sizeof(uint64_t));
+            }
+
+            if (!SoakPositionedIo(TRUE, Handle, WriteBuf.get(), BlockSize,
+                                  ByteOffset)) {
+                Tolerated++;  // injected write failure -- expected.
+                Seq++;
+                continue;
+            }
+            memset(ReadBuf.get(), 0, BlockSize);
+            if (!SoakPositionedIo(FALSE, Handle, ReadBuf.get(), BlockSize,
+                                  ByteOffset)) {
+                Tolerated++;  // injected read failure -- expected.
+                Seq++;
+                continue;
+            }
+            // A write AND read both succeeded: the data must be intact. A
+            // mishandled failure branch that corrupted completed I/O shows here.
+            if (memcmp(ReadBuf.get(), WriteBuf.get(), BlockSize) != 0) {
+                Corruptions++;
+                std::lock_guard<std::mutex> Guard(FirstFailureLock);
+                if (FirstFailure.empty())
+                    FirstFailure = "data mismatch at block " +
+                        std::to_string(Block) + " (worker " +
+                        std::to_string(WorkerId) + ")";
+            } else {
+                Succeeded++;
+            }
+            Seq++;
+        }
+    };
+
+    std::vector<std::thread> Workers;
+    for (DWORD i = 0; i < Threads; i++) {
+        Workers.emplace_back(Worker, i);
+    }
+    for (auto& Thread : Workers) {
+        Thread.join();
+    }
+
+    cout << "Fault-tolerant soak: " << Succeeded.load() << " verified ok, "
+         << Tolerated.load() << " tolerated failures, " << Threads
+         << " threads / " << Seconds << "s." << endl;
+    // Integrity must hold even under injection; failures themselves are fine.
+    EXPECT_EQ(0ULL, Corruptions.load())
+        << "data corruption under fault injection: " << FirstFailure;
+}
