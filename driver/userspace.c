@@ -181,7 +181,18 @@ WnbdInitializeDevice(_In_ PWNBD_DISK_DEVICE Device)
     Status = ObReferenceObjectByHandle(
         monitor_thread_handle, THREAD_ALL_ACCESS, NULL, KernelMode,
         &Device->DeviceMonitorThread, NULL);
+    // PsCreateSystemThread opened a handle in the system process handle table.
+    // Once we hold an object reference (or on failure) the handle must be
+    // closed, otherwise it leaks for the lifetime of the system on every
+    // mapping. We keep the driver alive via the object reference, not the
+    // handle.
+    ZwClose(monitor_thread_handle);
     if (!NT_SUCCESS(Status)) {
+        // Not reachable in practice for a valid, just-created kernel handle
+        // with THREAD_ALL_ACCESS. The monitor thread is already running with
+        // Device; there is no reference to wait on here, so this is treated as
+        // fatal and left for the caller's error path.
+        Device->DeviceMonitorThread = NULL;
         Status = STATUS_INSUFFICIENT_RESOURCES;
         goto Exit;
     }

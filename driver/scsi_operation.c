@@ -586,6 +586,10 @@ WnbdPendElement(_In_ PWNBD_EXTENSION DeviceExtension,
 
     PSRB_QUEUE_ELEMENT Element = WnbdAllocSrbElement(Device);
     if (NULL == Element) {
+        // This request never reaches the dispatch path that decrements the
+        // UnsubmittedIORequests gauge, so balance the increment above here
+        // (TotalReceivedIORequests is a lifetime total and stays as-is).
+        InterlockedDecrement64(&Device->Stats.UnsubmittedIORequests);
         Status = STATUS_INSUFFICIENT_RESOURCES;
         SrbSetSrbStatus(Srb, SRB_STATUS_ABORTED);
         goto Exit;
