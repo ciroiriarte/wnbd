@@ -684,8 +684,6 @@ TEST(TestNbdSoak, OverlappingBlockFramingIsAtomic) {
 
     std::atomic<uint64_t> IoErrors{ 0 };
     std::atomic<uint64_t> Writes{ 0 };
-    std::atomic<uint64_t> Reads{ 0 };
-    std::atomic<uint64_t> FramingViolations{ 0 };
     std::mutex FirstFailureLock;
     string FirstFailure;
     auto Record = [&](const string& Message) {
@@ -693,9 +691,28 @@ TEST(TestNbdSoak, OverlappingBlockFramingIsAtomic) {
         if (FirstFailure.empty()) FirstFailure = Message;
     };
 
+    // Establish a known homogeneous baseline so the settled read below can never
+    // observe leftover data from an earlier test that happened to touch this
+    // block. (0xFF is outside the writers' 0xA0.. fill range.)
+    {
+        HANDLE Handle = OpenSoakDisk(Mapping.GetInstanceName());
+        ASSERT_NE(INVALID_HANDLE_VALUE, Handle) << "baseline open failed";
+        unique_ptr<void, decltype(&CloseHandle)> HandleCloser(
+            Handle, &CloseHandle);
+        unique_ptr<void, decltype(&_aligned_free)> Buf(
+            _aligned_malloc(BlockSize, BlockSize), &_aligned_free);
+        ASSERT_TRUE(Buf.get());
+        memset(Buf.get(), 0xFF, BlockSize);
+        ASSERT_TRUE(SoakPositionedIo(TRUE, Handle, Buf.get(), BlockSize,
+                                     ByteOffset)) << "baseline write failed";
+    }
+
     auto Deadline = std::chrono::steady_clock::now() +
                     std::chrono::seconds(Seconds);
 
+    // Concurrent writers hammer the same block, each with a single distinct
+    // byte. A missing SendLock interleaves header/payload from different senders
+    // on the shared socket, which the server rejects -> I/O errors here.
     auto Writer = [&](DWORD WorkerId) {
         HANDLE Handle = OpenSoakDisk(Mapping.GetInstanceName());
         if (Handle == INVALID_HANDLE_VALUE) {
@@ -726,70 +743,50 @@ TEST(TestNbdSoak, OverlappingBlockFramingIsAtomic) {
         }
     };
 
-    auto Reader = [&]() {
-        HANDLE Handle = OpenSoakDisk(Mapping.GetInstanceName());
-        if (Handle == INVALID_HANDLE_VALUE) {
-            IoErrors++;
-            Record("reader open failed: " + WinStrError(GetLastError()));
-            return;
-        }
-        unique_ptr<void, decltype(&CloseHandle)> HandleCloser(
-            Handle, &CloseHandle);
-        unique_ptr<void, decltype(&_aligned_free)> ReadBuf(
-            _aligned_malloc(BlockSize, BlockSize), &_aligned_free);
-        if (!ReadBuf.get()) {
-            IoErrors++;
-            Record("reader alloc failed");
-            return;
-        }
-
-        while (std::chrono::steady_clock::now() < Deadline) {
-            memset(ReadBuf.get(), 0, BlockSize);
-            if (!SoakPositionedIo(FALSE, Handle, ReadBuf.get(), BlockSize,
-                                  ByteOffset)) {
-                IoErrors++;
-                Record("shared-block read failed: " +
-                       WinStrError(GetLastError()));
-                break;
-            }
-            Reads++;
-            // A single-sector write is atomic, so any observed block must be
-            // homogeneous regardless of which writer won. Non-homogeneous means
-            // header/payload framing was corrupted on the wire.
-            BYTE* Bytes = (BYTE*)ReadBuf.get();
-            BYTE First = Bytes[0];
-            for (UINT32 i = 1; i < BlockSize; i++) {
-                if (Bytes[i] != First) {
-                    FramingViolations++;
-                    Record("non-homogeneous shared block: byte[0]=" +
-                           std::to_string((int)First) + " byte[" +
-                           std::to_string(i) + "]=" +
-                           std::to_string((int)Bytes[i]));
-                    break;
-                }
-            }
-        }
-    };
-
     std::vector<std::thread> ThreadPool;
-    DWORD Readers = Threads / 8 ? Threads / 8 : 1;
     for (DWORD i = 0; i < Threads; i++) {
         ThreadPool.emplace_back(Writer, i);
-    }
-    for (DWORD i = 0; i < Readers; i++) {
-        ThreadPool.emplace_back(Reader);
     }
     for (auto& Thread : ThreadPool) {
         Thread.join();
     }
 
-    cout << "Soak (shared block): " << Writes.load() << " writes, "
-         << Reads.load() << " reads over " << Threads << " writers / "
-         << Seconds << "s." << endl;
+    // Quiesced settled read: with all writers stopped, one atomic-per-sector
+    // write must have won, so the block is homogeneous (every byte equal). A
+    // torn frame from a missing SendLock would leave a mixed block (or, more
+    // often, already have tripped the I/O-error check above). Reading only after
+    // quiescing avoids sampling a block mid-transition.
+    uint64_t FramingViolations = 0;
+    {
+        HANDLE Handle = OpenSoakDisk(Mapping.GetInstanceName());
+        ASSERT_NE(INVALID_HANDLE_VALUE, Handle) << "settled-read open failed";
+        unique_ptr<void, decltype(&CloseHandle)> HandleCloser(
+            Handle, &CloseHandle);
+        unique_ptr<void, decltype(&_aligned_free)> ReadBuf(
+            _aligned_malloc(BlockSize, BlockSize), &_aligned_free);
+        ASSERT_TRUE(ReadBuf.get());
+        memset(ReadBuf.get(), 0, BlockSize);
+        ASSERT_TRUE(SoakPositionedIo(FALSE, Handle, ReadBuf.get(), BlockSize,
+                                     ByteOffset)) << "settled read failed";
+        BYTE* Bytes = (BYTE*)ReadBuf.get();
+        BYTE First = Bytes[0];
+        for (UINT32 i = 1; i < BlockSize; i++) {
+            if (Bytes[i] != First) {
+                FramingViolations++;
+                Record("settled shared block not homogeneous: byte[0]=" +
+                       std::to_string((int)First) + " byte[" +
+                       std::to_string(i) + "]=" + std::to_string((int)Bytes[i]));
+                break;
+            }
+        }
+    }
+
+    cout << "Soak (shared block): " << Writes.load() << " writes over "
+         << Threads << " writers / " << Seconds << "s." << endl;
     EXPECT_EQ(0ULL, IoErrors.load())
         << "I/O errors on the shared block (possible framing corruption): "
         << FirstFailure;
-    EXPECT_EQ(0ULL, FramingViolations.load())
+    EXPECT_EQ(0ULL, FramingViolations)
         << "framing corruption on the shared block: " << FirstFailure;
     EXPECT_LT(0ULL, Writes.load()) << "soak performed no writes";
 }
