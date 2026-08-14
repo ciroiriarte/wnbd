@@ -793,3 +793,100 @@ TEST(TestNbdSoak, OverlappingBlockFramingIsAtomic) {
         << "framing corruption on the shared block: " << FirstFailure;
     EXPECT_LT(0ULL, Writes.load()) << "soak performed no writes";
 }
+
+// Teardown under load: hard-remove the mapping while many threads are actively
+// writing. This drives the driver's removal path (DrainDeviceQueue, submitted-
+// request tag-hash unlink, rundown release) concurrently with in-flight I/O and
+// the userspace daemon shutdown -- the removal-under-I/O race the other soak
+// tests never hit. The oracle is completion: no deadlock (a hang trips the CI
+// step timeout) and no crash. Run under Driver Verifier, a use-after-free or
+// pool error on the teardown path bugchecks the machine and fails the run.
+// Handles are opened before the storm so no worker calls GetDiskPath (which can
+// throw) while the device is being removed.
+TEST(TestNbdSoak, TeardownUnderLoad) {
+    if (const char* SkipReason = GetMissingNbdParamReason()) {
+        WNBD_GTEST_SKIP(SkipReason);
+    }
+
+    const DWORD Threads = SoakEnvDword("WNBD_SOAK_THREADS", 16);
+    const DWORD Rounds = SoakEnvDword("WNBD_SOAK_TEARDOWN_ROUNDS", 4);
+
+    for (DWORD Round = 0; Round < Rounds; Round++) {
+        WNBD_PROPERTIES WnbdProps = { 0 };
+        auto Mapping = std::make_unique<NbdMapping>(&WnbdProps);
+
+        WNBD_CONNECTION_INFO ConnectionInfo = { 0 };
+        ASSERT_FALSE(WnbdShow(WnbdProps.InstanceName, &ConnectionInfo))
+            << "couldn't retrieve WNBD disk info";
+        UINT64 BlockCount = ConnectionInfo.Properties.BlockCount;
+        UINT32 BlockSize = ConnectionInfo.Properties.BlockSize;
+        ASSERT_LT(0ULL, BlockCount);
+        ASSERT_LT(0UL, BlockSize);
+        SetDiskWritable(string(WnbdProps.InstanceName));
+
+        UINT64 StrideBlocks = BlockCount / ((UINT64)Threads + 2);
+        ASSERT_GE(StrideBlocks, 64ULL) << "disk too small for the teardown layout";
+
+        // Open every handle up front (disk is present now).
+        std::vector<HANDLE> Handles(Threads, INVALID_HANDLE_VALUE);
+        for (DWORD i = 0; i < Threads; i++) {
+            Handles[i] = OpenSoakDisk(Mapping->GetInstanceName());
+        }
+
+        std::atomic<bool> Stop{ false };
+        std::atomic<uint64_t> Ops{ 0 };
+        std::atomic<uint64_t> IoErrors{ 0 };
+        std::vector<std::thread> Workers;
+
+        for (DWORD i = 0; i < Threads; i++) {
+            Workers.emplace_back([&, i] {
+                HANDLE Handle = Handles[i];
+                if (Handle == INVALID_HANDLE_VALUE) {
+                    return;
+                }
+                unique_ptr<void, decltype(&_aligned_free)> Buf(
+                    _aligned_malloc(BlockSize, BlockSize), &_aligned_free);
+                if (!Buf.get()) {
+                    return;
+                }
+                memset(Buf.get(), 0x5a, BlockSize);
+                UINT64 RegionBase = (UINT64)i * StrideBlocks;
+                uint64_t Seq = 0;
+                while (!Stop.load()) {
+                    UINT64 Block = RegionBase + (Seq % 64);
+                    // Errors are expected once removal starts; stop on the first.
+                    if (!SoakPositionedIo(TRUE, Handle, Buf.get(), BlockSize,
+                                          Block * BlockSize)) {
+                        IoErrors++;
+                        break;
+                    }
+                    Ops++;
+                    Seq++;
+                }
+            });
+        }
+
+        // Let the I/O storm ramp up, then hard-remove mid-flight. NbdMapping's
+        // destructor issues a hard remove and joins the daemon thread; if that
+        // deadlocks against the in-flight I/O the test hangs (caught by the CI
+        // timeout).
+        Sleep(500);
+        Mapping.reset();
+        Stop.store(true);
+
+        for (auto& Worker : Workers) {
+            Worker.join();
+        }
+        for (HANDLE Handle : Handles) {
+            if (Handle != INVALID_HANDLE_VALUE) {
+                CloseHandle(Handle);
+            }
+        }
+
+        cout << "Teardown-under-load round " << Round << ": " << Ops.load()
+             << " ops before removal, " << IoErrors.load()
+             << " threads saw the expected removal error." << endl;
+    }
+
+    SUCCEED() << "teardown under concurrent I/O completed without hang or crash";
+}
