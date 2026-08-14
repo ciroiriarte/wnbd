@@ -219,12 +219,17 @@ DWORD NbdDaemon::TryStart()
             }
             if (BlockSizeInfo.Maximum &&
                     BlockSizeInfo.Maximum < WNBD_DEFAULT_MAX_TRANSFER_LENGTH) {
-                LogWarning("NBD server advertises a maximum block size of %u "
-                           "bytes, smaller than the default maximum transfer "
-                           "length of %u bytes. Large transfers may be "
-                           "rejected by the server.",
-                           BlockSizeInfo.Maximum,
-                           WNBD_DEFAULT_MAX_TRANSFER_LENGTH);
+                // MaximumTransferLength is advertised to Storport adapter-wide
+                // (it cannot be constrained per-LUN) and libwnbd does not
+                // fragment requests, so Storport may issue transfers larger
+                // than this server accepts. Refuse the mapping rather than let
+                // those transfers fail at runtime.
+                LogError("NBD server maximum block size %u is smaller than the "
+                         "adapter maximum transfer length %u and cannot be "
+                         "honored per-mapping; refusing.",
+                         BlockSizeInfo.Maximum,
+                         WNBD_DEFAULT_MAX_TRANSFER_LENGTH);
+                return ERROR_NOT_SUPPORTED;
             }
         }
 
