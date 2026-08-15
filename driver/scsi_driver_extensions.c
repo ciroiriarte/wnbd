@@ -48,8 +48,6 @@ WnbdHwAdapterControl(PVOID DeviceExtension,
                      SCSI_ADAPTER_CONTROL_TYPE ControlType,
                      PVOID Parameters)
 {
-    UNREFERENCED_PARAMETER(DeviceExtension);
-
     WNBD_LOG_DEBUG(
         "Received control type: %s (%d)",
         WnbdToStringScsiAdapterCtrlType(ControlType),
@@ -58,6 +56,16 @@ WnbdHwAdapterControl(PVOID DeviceExtension,
     case ScsiQuerySupportedControlTypes:
         WnbdScsiAdapterSupportControlTypes(
             (PSCSI_SUPPORTED_CONTROL_TYPE_LIST)Parameters);
+        break;
+    case ScsiStopAdapter:
+        // Called at PASSIVE_LEVEL when the adapter is stopped for a system power
+        // transition (shutdown/reboot/sleep). Tear down every mapping now so
+        // pending I/O is aborted in-driver; otherwise a device with in-flight
+        // I/O -- whose userspace daemon is being torn down at shutdown and can
+        // no longer complete requests -- stalls the PnP power transition until
+        // the 10-minute watchdog fires a BugCheck 0x9F DRIVER_POWER_STATE_FAILURE.
+        // Reuses the same cleanup path as adapter free; safe to run again there.
+        WnbdCleanupAllDevices((PWNBD_EXTENSION) DeviceExtension);
         break;
     default:
         break;
