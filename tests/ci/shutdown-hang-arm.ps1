@@ -127,7 +127,11 @@ for ($i = 0; $i -lt 30; $i++) {
     # error record surfacing as a terminating error under some PS hosts.
     $list = ""
     try { $list = (& wnbd-client list 2>&1 | Out-String) } catch { $list = "$_" }
-    if ($list -match [regex]::Escape($ExportName) -or $list -match 'Connected') {
+    # A live mapping shows as a data row under the "Pid DiskNumber ..." header,
+    # e.g. "4904  1  true  WnbdTests  <InstanceName>". Match any row that starts
+    # with the Pid + DiskNumber columns; the export name is not echoed here.
+    $rows = @($list -split "`n" | Where-Object { $_ -match '^\s*\d+\s+\d+\s' })
+    if ($rows.Count -ge 1) {
         $mapped = $true
         break
     }
