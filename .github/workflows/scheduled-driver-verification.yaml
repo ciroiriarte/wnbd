@@ -18,10 +18,10 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: microsoft/setup-msbuild@v2
+      - uses: microsoft/setup-msbuild@v3
         with:
           msbuild-architecture: x64
       - name: "Add toolkit bin dir to env PATH"
@@ -51,7 +51,7 @@ jobs:
             }
       - name: "Upload SDV diagnostics"
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wnbd-scheduled-driver-verification
           path: ci-artifacts
@@ -71,10 +71,10 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: microsoft/setup-msbuild@v2
+      - uses: microsoft/setup-msbuild@v3
         with:
           msbuild-architecture: x64
       - name: "Add toolkit bin dir to env PATH"
@@ -116,7 +116,7 @@ jobs:
         run: powershell -ExecutionPolicy Bypass -File tests\ci\collect-diagnostics.ps1 -OutputDir ci-artifacts
       - name: "Upload Driver Verifier diagnostics"
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wnbd-scheduled-driver-verifier-smoke
           path: ci-artifacts
@@ -145,10 +145,10 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: microsoft/setup-msbuild@v2
+      - uses: microsoft/setup-msbuild@v3
         with:
           msbuild-architecture: x64
       - name: "Add toolkit bin dir to env PATH"
@@ -195,7 +195,7 @@ jobs:
             throw "Driver Verifier (volatile) is not verifying wnbd.sys; refusing to report hollow verification."
           }
           Write-Host "Driver Verifier (volatile Pool Tracking) attached to wnbd.sys."
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.x'
       - name: "Install qemu, used for NBD tests"
@@ -248,7 +248,7 @@ jobs:
         run: powershell -ExecutionPolicy Bypass -File tests\ci\stop-qemu.ps1
       - name: "Upload diagnostics"
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wnbd-driver-verifier-soak
           path: ci-artifacts
@@ -272,10 +272,10 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: microsoft/setup-msbuild@v2
+      - uses: microsoft/setup-msbuild@v3
         with:
           msbuild-architecture: x64
       - name: "Add toolkit bin dir to env PATH"
@@ -365,7 +365,7 @@ jobs:
         run: powershell -ExecutionPolicy Bypass -File tests\ci\stop-qemu.ps1
       - name: "Upload diagnostics"
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wnbd-sendlock-negative-control
           path: ci-artifacts

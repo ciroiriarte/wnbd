@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: "Run fake NBD harness self-test"
         run: python3 tests/nbd_protocol_harness/fake_nbd_server.py --self-test
 
@@ -19,10 +19,10 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: microsoft/setup-msbuild@v2
+      - uses: microsoft/setup-msbuild@v3
         with:
           msbuild-architecture: x64
       # stampinf.exe can be unavailable unless the toolkit bin directory is on PATH.
@@ -47,10 +47,10 @@ jobs:
         configuration: [Debug, Release]
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: microsoft/setup-msbuild@v2
+      - uses: microsoft/setup-msbuild@v3
         with:
           msbuild-architecture: x64
       # stampinf.exe can be unavailable unless the toolkit bin directory is on PATH.
@@ -95,7 +95,7 @@ jobs:
         run: >
           wnbd-client install-driver --debug
           vstudio\x64\${{ matrix.configuration }}\driver\wnbd.inf
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.x'
       - name: "Run fake NBD DISC assertion test"
@@ -222,7 +222,7 @@ jobs:
         run: powershell -ExecutionPolicy Bypass -File tests\ci\stop-qemu.ps1
       - name: "Upload diagnostics"
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wnbd-${{ matrix.configuration }}-diagnostics
           path: ci-artifacts
