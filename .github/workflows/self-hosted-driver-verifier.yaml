@@ -28,6 +28,10 @@ name: Self-hosted driver verifier
 # A GitHub job cannot survive the reboot of its own runner, so the abrupt-reboot
 # check is two dispatches: run 'shutdown-hang-arm', wait for the runner to come
 # back, then run 'shutdown-hang-verify'. See tests/ci/shutdown-hang-arm.ps1.
+#
+# The runner is registered ON DEMAND and ephemeral (one job, then it removes
+# itself) rather than left permanently connected - safer for a public repo. See
+# tests/ci/setup-ephemeral-runner.ps1 for the register-per-session flow.
 on:
   workflow_dispatch:
     inputs:
