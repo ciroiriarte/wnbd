@@ -51,3 +51,6 @@ include/version.h
 
 # oh-my-claudecode operational state (runtime artifacts, not source)
 /.omc/
+
+# Local lab config for the self-hosted dispatch helper (never commit)
+/tests/ci/lab.env
