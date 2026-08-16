@@ -15,9 +15,30 @@ name: Self-hosted driver verifier
 #   - Visual Studio / MSBuild + WDK, qemu reachable (installed or on PATH).
 #
 # Manual-dispatch only; it never runs on GitHub-hosted CI.
+#
+# The 'mode' input selects what runs:
+#   soak                 (default) concurrency soak under full Driver Verifier.
+#   shutdown-hang-arm    Abrupt-reboot-under-I/O regression check, arm phase:
+#                        starts an in-flight I/O soak and triggers an abrupt
+#                        reboot, then exits green. The runner reboots ~20s later.
+#   shutdown-hang-verify Reads the outcome the boot-time task recorded and fails
+#                        if a new 0x9F bugcheck appeared or the driver did not
+#                        come back. Dispatch this AFTER the runner is back online.
+#
+# A GitHub job cannot survive the reboot of its own runner, so the abrupt-reboot
+# check is two dispatches: run 'shutdown-hang-arm', wait for the runner to come
+# back, then run 'shutdown-hang-verify'. See tests/ci/shutdown-hang-arm.ps1.
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: "What to run"
+        type: choice
+        default: "soak"
+        options:
+          - soak
+          - shutdown-hang-arm
+          - shutdown-hang-verify
       soak_seconds:
         description: "Soak duration per test (seconds)"
         default: "60"
@@ -30,6 +51,7 @@ on:
 
 jobs:
   verifier-soak:
+    if: inputs.mode == 'soak'
     runs-on: [self-hosted, windows, wnbd-verifier]
     timeout-minutes: 60
     steps:
@@ -135,5 +157,119 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: wnbd-self-hosted-verifier
+          path: ci-artifacts
+          if-no-files-found: ignore
+
+  # Arm phase of the abrupt-shutdown-hang regression check. Builds and installs
+  # the driver under verifier, starts an in-flight I/O soak, then triggers an
+  # abrupt reboot on a short delay and exits green. The runner reboots while I/O
+  # is still in flight. Dispatch 'shutdown-hang-verify' once it is back online.
+  shutdown-hang-arm:
+    if: inputs.mode == 'shutdown-hang-arm'
+    runs-on: [self-hosted, windows, wnbd-verifier]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
+      - name: "Add toolkit bin dir to env PATH"
+        run: >
+          Add-Content $env:GITHUB_PATH
+          "C:\Program Files (x86)\Windows Kits\10\bin\x64"
+      - name: "Confirm Driver Verifier is active on wnbd.sys"
+        run: |
+          $Query = verifier.exe /query
+          if ("$Query" -notmatch 'wnbd\.sys') {
+            throw "Driver Verifier is not active for wnbd.sys on this runner. Run tests\ci\enable-driver-verifier.ps1 and reboot the VM."
+          }
+          Write-Host "Driver Verifier active for wnbd.sys."
+      - name: "Build WNBD Release"
+        run: >
+          msbuild vstudio\wnbd.sln
+          /property:Configuration=Release
+      - name: "Add WNBD build directory to env PATH"
+        run: >
+          Add-Content $env:GITHUB_PATH
+          (Resolve-Path vstudio\x64\Release).Path
+      - name: "Import WNBD certificate to root store"
+        run: >
+          Import-Certificate
+          -FilePath vstudio\x64\Release\wnbd.cer
+          -Cert Cert:\LocalMachine\Root
+      - name: "Import WNBD certificate to trusted publisher store"
+        run: >
+          Import-Certificate
+          -FilePath vstudio\x64\Release\wnbd.cer
+          -Cert Cert:\LocalMachine\TrustedPublisher
+      - name: "Import WNBD event definitions"
+        run: wevtutil im vstudio\wnbdevents.xml
+      - name: "Install the WNBD driver and create the virtual adapter"
+        timeout-minutes: 2
+        run: >
+          wnbd-client install-driver --debug
+          vstudio\x64\Release\driver\wnbd.inf
+      - name: "Install qemu, used for NBD tests"
+        run: |
+          $attempts = 3
+          for ($i = 1; $i -le $attempts; $i++) {
+            choco install qemu --version 2023.4.24 -y --no-progress
+            if ($LASTEXITCODE -eq 0) { break }
+            Write-Host "choco install qemu failed (attempt $i/$attempts, exit code $LASTEXITCODE)."
+            if ($i -eq $attempts) { throw "Failed to install qemu after $attempts attempt(s)." }
+            Start-Sleep -Seconds 15
+          }
+      - name: "Add qemu directory to env PATH"
+        run: Add-Content $env:GITHUB_PATH 'C:\Program Files\qemu'
+      - name: "Create qcow2 image, used for NBD"
+        run: qemu-img create -f qcow2 test_5tb.qcow2 5T
+      - name: "Start qemu-storage-daemon NBD server and wait until ready"
+        run: >
+          powershell -ExecutionPolicy Bypass -File tests\ci\start-qemu-nbd.ps1
+          -ImagePath test_5tb.qcow2
+          -HostName 127.0.0.1
+          -Port 10809
+          -ExportName test_5tb
+          -OutputDir ci-artifacts
+          -TimeoutSeconds 30
+      - name: "Arm the abrupt-shutdown-hang check (starts I/O, schedules reboot)"
+        # This launches a detached in-flight I/O soak, registers a boot-time
+        # capture task, and triggers an abrupt reboot ~20s out. The step goes
+        # green first so GitHub does not mark the job failed; the runner then
+        # reboots while I/O is in flight.
+        env:
+          WNBD_DISPATCHER_THREADS: ${{ inputs.dispatcher_threads }}
+        run: >
+          powershell -ExecutionPolicy Bypass -File tests\ci\shutdown-hang-arm.ps1
+          -ExportName test_5tb
+          -HostName 127.0.0.1
+          -Port 10809
+          -SoakThreads ${{ inputs.soak_threads }}
+          -DispatcherThreads ${{ inputs.dispatcher_threads }}
+
+  # Verify phase. Run this AFTER the runner has rebooted and reconnected. It
+  # reads the outcome the boot-time task recorded and fails if a new 0x9F
+  # bugcheck appeared or the boot-start driver did not come back RUNNING.
+  shutdown-hang-verify:
+    if: inputs.mode == 'shutdown-hang-verify'
+    runs-on: [self-hosted, windows, wnbd-verifier]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: "Verify the abrupt-shutdown-hang outcome"
+        run: >
+          powershell -ExecutionPolicy Bypass -File tests\ci\shutdown-hang-verify.ps1
+          -Mode verify
+          -OutputDir ci-artifacts
+      - name: "Collect diagnostics"
+        if: always()
+        run: powershell -ExecutionPolicy Bypass -File tests\ci\collect-diagnostics.ps1 -OutputDir ci-artifacts
+      - name: "Upload diagnostics"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wnbd-shutdown-hang
           path: ci-artifacts
           if-no-files-found: ignore
